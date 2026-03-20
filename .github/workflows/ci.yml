@@ -111,9 +111,12 @@ jobs:
         env:
           SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           $archivePath = Join-Path $env:RUNNER_TEMP "source.tar.gz"
 
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
+          }
           New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 
           curl.exe -L `
@@ -128,7 +131,7 @@ jobs:
       - name: Verify source layout
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           Set-Location $buildRoot
           if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
           if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
@@ -137,7 +140,8 @@ jobs:
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $env:BUN_INSTALL_CACHE_DIR = Join-Path $env:GITHUB_WORKSPACE ".bun-install-cache"
           Set-Location $buildRoot
           bun install --ignore-scripts --backend=hardlink --frozen-lockfile
 
@@ -145,7 +149,8 @@ jobs:
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $env:BUN_INSTALL_CACHE_DIR = Join-Path $env:GITHUB_WORKSPACE ".bun-install-cache"
           Set-Location $buildRoot
           bun x sherif
           bun run --filter=@codebay/desktop install:deps
@@ -154,7 +159,7 @@ jobs:
         if: ${{ needs.resolve.outputs.target != 'win-x64' }}
         shell: bash
         run: |
-          BUILD_ROOT="${RUNNER_TEMP}/build-src"
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
           bun install --frozen-lockfile
 
@@ -163,7 +168,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           Set-Location $buildRoot
           node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
 
@@ -171,7 +176,7 @@ jobs:
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           Set-Location $buildRoot
           mise run release-win-x64
 
@@ -179,7 +184,7 @@ jobs:
         if: ${{ needs.resolve.outputs.target == 'mac-arm64' }}
         shell: bash
         run: |
-          BUILD_ROOT="${RUNNER_TEMP}/build-src"
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
           mise run release-mac-arm64
 
@@ -187,14 +192,14 @@ jobs:
         if: ${{ needs.resolve.outputs.target == 'mac-x64' }}
         shell: bash
         run: |
-          BUILD_ROOT="${RUNNER_TEMP}/build-src"
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
           mise run release-mac-x64
 
       - name: Collect release files
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           Set-Location $buildRoot
           $releaseDir = "apps/desktop/release"
           if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
@@ -234,7 +239,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           if (Test-Path $buildRoot) {
             Remove-Item -Recurse -Force $buildRoot
           }
