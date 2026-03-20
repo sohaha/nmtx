@@ -132,7 +132,8 @@ jobs:
             throw "failed to configure source remote"
           }
 
-          git -c http.extraheader="AUTHORIZATION: bearer $env:SOURCE_TOKEN" fetch --depth=1 origin $sha
+          $basicAuthToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:SOURCE_TOKEN"))
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic $basicAuthToken" fetch --depth=1 origin $sha
           if ($LASTEXITCODE -ne 0) {
             throw "failed to fetch source commit"
           }
