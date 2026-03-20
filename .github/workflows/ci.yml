@@ -143,7 +143,7 @@ jobs:
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           $env:BUN_INSTALL_CACHE_DIR = Join-Path $env:GITHUB_WORKSPACE ".bun-install-cache"
           Set-Location $buildRoot
-          bun install --ignore-scripts --backend=hardlink --frozen-lockfile
+          bun install --ignore-scripts --linker=hoisted --backend=copyfile --frozen-lockfile
 
       - name: Run required postinstall steps on Windows
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
