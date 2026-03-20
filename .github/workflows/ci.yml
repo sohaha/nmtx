@@ -113,20 +113,39 @@ jobs:
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           $archivePath = Join-Path $env:RUNNER_TEMP "source.tar.gz"
+          $repo = '${{ needs.resolve.outputs.source_repo }}'
+          $sha = '${{ needs.resolve.outputs.source_sha }}'
 
           if (Test-Path $buildRoot) {
             Remove-Item -Recurse -Force $buildRoot
           }
           New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 
-          curl.exe -L `
+          $env:GH_TOKEN = $env:SOURCE_TOKEN
+          gh api `
+            --method GET `
             -H "Accept: application/vnd.github+json" `
-            -H "Authorization: Bearer $env:SOURCE_TOKEN" `
             -H "X-GitHub-Api-Version: 2022-11-28" `
-            "https://api.github.com/repos/${{ needs.resolve.outputs.source_repo }}/tarball/${{ needs.resolve.outputs.source_sha }}" `
-            -o $archivePath
+            "/repos/$repo/tarball/$sha" `
+            --output $archivePath
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to download source archive"
+          }
+
+          if (-not (Test-Path $archivePath)) {
+            throw "failed to download source archive"
+          }
+
+          tar -tzf $archivePath | Select-Object -First 1 | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            $archiveSize = (Get-Item $archivePath).Length
+            throw "downloaded source archive is invalid (size=$archiveSize)"
+          }
 
           tar -xzf $archivePath -C $buildRoot --strip-components=1
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to extract source archive"
+          }
 
       - name: Verify source layout
         shell: pwsh
