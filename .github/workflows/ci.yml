@@ -22,6 +22,10 @@ on:
           - win-x64
           - mac-arm64
           - mac-x64
+      targets:
+        required: false
+        type: string
+        description: "Optional comma-separated targets. Supports mac alias and normalizes win-64 to win-x64."
       channel:
         required: true
         type: choice
@@ -44,10 +48,10 @@ jobs:
       source_repo: ${{ steps.payload.outputs.source_repo }}
       source_sha: ${{ steps.payload.outputs.source_sha }}
       version: ${{ steps.payload.outputs.version }}
-      target: ${{ steps.payload.outputs.target }}
+      targets: ${{ steps.targets.outputs.targets }}
       channel: ${{ steps.payload.outputs.channel }}
       release_repo: ${{ steps.payload.outputs.release_repo }}
-      runner: ${{ steps.runner.outputs.runner }}
+      matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - name: Resolve payload
         id: payload
@@ -58,6 +62,7 @@ jobs:
             echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
             echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
             echo "target=${{ github.event.client_payload.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ github.event.client_payload.targets }}" >> "$GITHUB_OUTPUT"
             echo "channel=${{ github.event.client_payload.channel }}" >> "$GITHUB_OUTPUT"
             echo "release_repo=${{ github.event.client_payload.release_repo }}" >> "$GITHUB_OUTPUT"
           else
@@ -65,6 +70,7 @@ jobs:
             echo "source_sha=${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
             echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
             echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
             echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
           fi
@@ -76,23 +82,76 @@ jobs:
           [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codebay-releases" ]] || exit 1
           [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
-          [[ "${{ steps.payload.outputs.target }}" =~ ^(win-x64|mac-arm64|mac-x64)$ ]] || exit 1
           [[ "${{ steps.payload.outputs.channel }}" =~ ^(latest|canary)$ ]] || exit 1
 
-      - name: Select runner
-        id: runner
+      - name: Normalize targets
+        id: targets
         shell: bash
         run: |
-          TARGET='${{ steps.payload.outputs.target }}'
-          if [[ "$TARGET" == "win-x64" ]]; then
-            echo "runner=windows-latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "runner=macos-latest" >> "$GITHUB_OUTPUT"
+          RAW_TARGETS='${{ steps.payload.outputs.targets_input }}'
+          if [[ -z "$RAW_TARGETS" ]]; then
+            RAW_TARGETS='${{ steps.payload.outputs.target }}'
           fi
+
+          RAW_TARGETS="${RAW_TARGETS//[[:space:]]/}"
+          [[ -n "$RAW_TARGETS" ]] || {
+            echo "missing target(s)"
+            exit 1
+          }
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$RAW_TARGETS"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              mac)
+                expanded=("mac-arm64" "mac-x64")
+                ;;
+              win-64)
+                expanded=("win-x64")
+                ;;
+              all)
+                expanded=("win-x64" "mac-arm64" "mac-x64")
+                ;;
+              win-x64|mac-arm64|mac-x64)
+                expanded=("$item")
+                ;;
+              *)
+                echo "invalid target: $item"
+                exit 1
+                ;;
+            esac
+
+            for expanded_target in "${expanded[@]}"; do
+              if [[ -z "${seen[$expanded_target]:-}" ]]; then
+                seen[$expanded_target]=1
+                normalized+=("$expanded_target")
+              fi
+            done
+          done
+
+          targets_csv="$(IFS=,; echo "${normalized[*]}")"
+          matrix="["
+          for normalized_target in "${normalized[@]}"; do
+            runner="macos-latest"
+            if [[ "$normalized_target" == "win-x64" ]]; then
+              runner="windows-latest"
+            fi
+            matrix+="{\"target\":\"$normalized_target\",\"runner\":\"$runner\"},"
+          done
+          matrix="${matrix%,}]"
+
+          echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
     needs: resolve
-    runs-on: ${{ needs.resolve.outputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout nmtx
@@ -154,7 +213,7 @@ jobs:
           if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
 
       - name: Install node-gyp for Windows Bun install
-        if: ${{ needs.resolve.outputs.target == 'win-x64' }}
+        if: ${{ matrix.target == 'win-x64' }}
         shell: pwsh
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
@@ -169,7 +228,7 @@ jobs:
           }
 
       - name: Install dependencies on Windows
-        if: ${{ needs.resolve.outputs.target == 'win-x64' }}
+        if: ${{ matrix.target == 'win-x64' }}
         shell: pwsh
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
@@ -178,7 +237,7 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Install dependencies on macOS
-        if: ${{ needs.resolve.outputs.target != 'win-x64' }}
+        if: ${{ matrix.target != 'win-x64' }}
         shell: bash
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
@@ -195,7 +254,7 @@ jobs:
           node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
 
       - name: Build Windows release
-        if: ${{ needs.resolve.outputs.target == 'win-x64' }}
+        if: ${{ matrix.target == 'win-x64' }}
         shell: pwsh
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
@@ -203,7 +262,7 @@ jobs:
           mise run release-win-x64
 
       - name: Build macOS arm64 release
-        if: ${{ needs.resolve.outputs.target == 'mac-arm64' }}
+        if: ${{ matrix.target == 'mac-arm64' }}
         shell: bash
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
@@ -211,7 +270,7 @@ jobs:
           mise run release-mac-arm64
 
       - name: Build macOS x64 release
-        if: ${{ needs.resolve.outputs.target == 'mac-x64' }}
+        if: ${{ matrix.target == 'mac-x64' }}
         shell: bash
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
@@ -251,6 +310,12 @@ jobs:
           gh release view $tag --repo $releaseRepo *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $releaseRepo --title $tag --notes "Automated release for $tag"
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag --repo $releaseRepo *> $null
+              if ($LASTEXITCODE -ne 0) {
+                throw "failed to create release: $tag"
+              }
+            }
           }
 
           foreach ($file in $releaseFiles) {
