@@ -153,6 +153,21 @@ jobs:
           if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
           if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
 
+      - name: Install node-gyp for Windows Bun install
+        if: ${{ needs.resolve.outputs.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          $nodeGypVersion = node -p "require('./package.json').devDependencies['node-gyp']"
+          if ([string]::IsNullOrWhiteSpace($nodeGypVersion)) {
+            throw "missing node-gyp version in package.json"
+          }
+          npm install --global "node-gyp@$nodeGypVersion"
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to install global node-gyp"
+          }
+
       - name: Install dependencies on Windows
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
         shell: pwsh
