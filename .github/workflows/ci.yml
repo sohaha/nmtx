@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 env:
-  BUILD_ROOT: ${{ github.workspace }}/build-src
+  BUILD_ROOT: ${{ runner.temp }}/build-src
 
 jobs:
   resolve:
@@ -110,50 +110,48 @@ jobs:
         uses: jdx/mise-action@v2
 
       - name: Download source tarball
-        shell: bash
+        shell: pwsh
         env:
           SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
         run: |
-          mkdir -p "$BUILD_ROOT"
-          curl -L \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ needs.resolve.outputs.source_repo }}/tarball/${{ needs.resolve.outputs.source_sha }}" \
-            -o "$RUNNER_TEMP/source.tar.gz"
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          $archivePath = Join-Path $env:RUNNER_TEMP "source.tar.gz"
 
-          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C "$BUILD_ROOT" --strip-components=1
+          New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+
+          curl.exe -L `
+            -H "Accept: application/vnd.github+json" `
+            -H "Authorization: Bearer $env:SOURCE_TOKEN" `
+            -H "X-GitHub-Api-Version: 2022-11-28" `
+            "https://api.github.com/repos/${{ needs.resolve.outputs.source_repo }}/tarball/${{ needs.resolve.outputs.source_sha }}" `
+            -o $archivePath
+
+          tar -xzf $archivePath -C $buildRoot --strip-components=1
 
       - name: Verify source layout
-        shell: bash
+        shell: pwsh
         working-directory: ${{ env.BUILD_ROOT }}
         run: |
-          test -f .mise.toml
-          test -f apps/desktop/package.json
+          if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
+          if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
 
       - name: Install dependencies
-        shell: bash
+        shell: pwsh
         working-directory: ${{ env.BUILD_ROOT }}
         run: |
           bun install --frozen-lockfile
 
       - name: Update app version
-        shell: bash
+        shell: pwsh
         working-directory: ${{ env.BUILD_ROOT }}
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const path = 'apps/desktop/package.json';
-          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-          pkg.version = process.env.RELEASE_VERSION;
-          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
-          NODE
+          node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
 
       - name: Build Windows release
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
-        shell: bash
+        shell: pwsh
         working-directory: ${{ env.BUILD_ROOT }}
         run: |
           mise run release-win-x64
@@ -173,42 +171,47 @@ jobs:
           mise run release-mac-x64
 
       - name: Collect release files
-        shell: bash
+        shell: pwsh
         working-directory: ${{ env.BUILD_ROOT }}
         run: |
-          RELEASE_DIR="apps/desktop/release"
-          test -d "$RELEASE_DIR"
+          $releaseDir = "apps/desktop/release"
+          if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
 
-          find "$RELEASE_DIR" \
-            \( -name "*.exe" -o -name "*.dmg" -o -name "*.zip" -o -name "*.7z" -o -name "*.yml" -o -name "*.blockmap" \) \
-            -type f > "$RUNNER_TEMP/release-files.txt"
+          $patterns = @("*.exe", "*.dmg", "*.zip", "*.7z", "*.yml", "*.blockmap")
+          $files = foreach ($pattern in $patterns) {
+            Get-ChildItem -Path $releaseDir -Filter $pattern -File -Recurse | Select-Object -ExpandProperty FullName
+          }
 
-          test -s "$RUNNER_TEMP/release-files.txt"
+          if (-not $files -or $files.Count -eq 0) {
+            throw "no release assets found"
+          }
+
+          $files | Set-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
 
       - name: Upload to codebay-releases
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
-          VERSION='${{ needs.resolve.outputs.version }}'
-          CHANNEL='${{ needs.resolve.outputs.channel }}'
-          RELEASE_REPO='${{ needs.resolve.outputs.release_repo }}'
+          $version = '${{ needs.resolve.outputs.version }}'
+          $channel = '${{ needs.resolve.outputs.channel }}'
+          $releaseRepo = '${{ needs.resolve.outputs.release_repo }}'
+          $tag = if ($channel -eq 'latest') { "v$version" } else { "v$version-$channel" }
+          $releaseFiles = Get-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
 
-          if [[ "$CHANNEL" == "latest" ]]; then
-            TAG="v$VERSION"
-          else
-            TAG="v$VERSION-$CHANNEL"
-          fi
+          gh release view $tag --repo $releaseRepo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $releaseRepo --title $tag --notes "Automated release for $tag"
+          }
 
-          gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$RELEASE_REPO" --title "$TAG" --notes "Automated release for $TAG"
-
-          while IFS= read -r file; do
-            gh release upload "$TAG" "$file" --repo "$RELEASE_REPO" --clobber
-          done < "$RUNNER_TEMP/release-files.txt"
+          foreach ($file in $releaseFiles) {
+            gh release upload $tag $file --repo $releaseRepo --clobber
+          }
 
       - name: Cleanup source
         if: always()
-        shell: bash
+        shell: pwsh
         run: |
-          rm -rf "$BUILD_ROOT"
+          if (Test-Path $env:BUILD_ROOT) {
+            Remove-Item -Recurse -Force $env:BUILD_ROOT
+          }
