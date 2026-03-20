@@ -37,9 +37,6 @@ on:
 permissions:
   contents: read
 
-env:
-  BUILD_ROOT: ${{ runner.temp }}/build-src
-
 jobs:
   resolve:
     runs-on: ubuntu-latest
@@ -130,50 +127,57 @@ jobs:
 
       - name: Verify source layout
         shell: pwsh
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          Set-Location $buildRoot
           if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
           if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
 
       - name: Install dependencies
         shell: pwsh
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          Set-Location $buildRoot
           bun install --frozen-lockfile
 
       - name: Update app version
         shell: pwsh
-        working-directory: ${{ env.BUILD_ROOT }}
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          Set-Location $buildRoot
           node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
 
       - name: Build Windows release
         if: ${{ needs.resolve.outputs.target == 'win-x64' }}
         shell: pwsh
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          Set-Location $buildRoot
           mise run release-win-x64
 
       - name: Build macOS arm64 release
         if: ${{ needs.resolve.outputs.target == 'mac-arm64' }}
         shell: bash
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          BUILD_ROOT="${RUNNER_TEMP}/build-src"
+          cd "$BUILD_ROOT"
           mise run release-mac-arm64
 
       - name: Build macOS x64 release
         if: ${{ needs.resolve.outputs.target == 'mac-x64' }}
         shell: bash
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          BUILD_ROOT="${RUNNER_TEMP}/build-src"
+          cd "$BUILD_ROOT"
           mise run release-mac-x64
 
       - name: Collect release files
         shell: pwsh
-        working-directory: ${{ env.BUILD_ROOT }}
         run: |
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          Set-Location $buildRoot
           $releaseDir = "apps/desktop/release"
           if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
 
@@ -212,6 +216,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if (Test-Path $env:BUILD_ROOT) {
-            Remove-Item -Recurse -Force $env:BUILD_ROOT
+          $buildRoot = Join-Path $env:RUNNER_TEMP "build-src"
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
           }
