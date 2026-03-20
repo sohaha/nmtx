@@ -1,0 +1,214 @@
+name: Build Codebay Release
+
+on:
+  repository_dispatch:
+    types: [build-codebay-release]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        required: true
+        type: string
+        default: sohaha/codebay
+      source_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      target:
+        required: true
+        type: choice
+        options:
+          - win-x64
+          - mac-arm64
+          - mac-x64
+      channel:
+        required: true
+        type: choice
+        options:
+          - latest
+          - canary
+        default: latest
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/codebay-releases
+
+permissions:
+  contents: read
+
+env:
+  BUILD_ROOT: ${{ github.workspace }}/build-src
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_repo: ${{ steps.payload.outputs.source_repo }}
+      source_sha: ${{ steps.payload.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      target: ${{ steps.payload.outputs.target }}
+      channel: ${{ steps.payload.outputs.channel }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ github.event.client_payload.target }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ github.event.client_payload.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ github.event.client_payload.release_repo }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_repo=${{ inputs.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/codebay" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codebay-releases" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.target }}" =~ ^(win-x64|mac-arm64|mac-x64)$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.channel }}" =~ ^(latest|canary)$ ]] || exit 1
+
+      - name: Select runner
+        id: runner
+        shell: bash
+        run: |
+          TARGET='${{ steps.payload.outputs.target }}'
+          if [[ "$TARGET" == "win-x64" ]]; then
+            echo "runner=windows-latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "runner=macos-latest" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    runs-on: ${{ needs.resolve.outputs.runner }}
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+
+      - name: Download source tarball
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          mkdir -p "$BUILD_ROOT"
+          curl -L \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ needs.resolve.outputs.source_repo }}/tarball/${{ needs.resolve.outputs.source_sha }}" \
+            -o "$RUNNER_TEMP/source.tar.gz"
+
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C "$BUILD_ROOT" --strip-components=1
+
+      - name: Verify source layout
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          test -f .mise.toml
+          test -f apps/desktop/package.json
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          bun install --frozen-lockfile
+
+      - name: Update app version
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = 'apps/desktop/package.json';
+          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+          pkg.version = process.env.RELEASE_VERSION;
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+
+      - name: Build Windows release
+        if: ${{ needs.resolve.outputs.target == 'win-x64' }}
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          mise run release-win-x64
+
+      - name: Build macOS arm64 release
+        if: ${{ needs.resolve.outputs.target == 'mac-arm64' }}
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          mise run release-mac-arm64
+
+      - name: Build macOS x64 release
+        if: ${{ needs.resolve.outputs.target == 'mac-x64' }}
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          mise run release-mac-x64
+
+      - name: Collect release files
+        shell: bash
+        working-directory: ${{ env.BUILD_ROOT }}
+        run: |
+          RELEASE_DIR="apps/desktop/release"
+          test -d "$RELEASE_DIR"
+
+          find "$RELEASE_DIR" \
+            \( -name "*.exe" -o -name "*.dmg" -o -name "*.zip" -o -name "*.7z" -o -name "*.yml" -o -name "*.blockmap" \) \
+            -type f > "$RUNNER_TEMP/release-files.txt"
+
+          test -s "$RUNNER_TEMP/release-files.txt"
+
+      - name: Upload to codebay-releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          VERSION='${{ needs.resolve.outputs.version }}'
+          CHANNEL='${{ needs.resolve.outputs.channel }}'
+          RELEASE_REPO='${{ needs.resolve.outputs.release_repo }}'
+
+          if [[ "$CHANNEL" == "latest" ]]; then
+            TAG="v$VERSION"
+          else
+            TAG="v$VERSION-$CHANNEL"
+          fi
+
+          gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$RELEASE_REPO" --title "$TAG" --notes "Automated release for $TAG"
+
+          while IFS= read -r file; do
+            gh release upload "$TAG" "$file" --repo "$RELEASE_REPO" --clobber
+          done < "$RUNNER_TEMP/release-files.txt"
+
+      - name: Cleanup source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$BUILD_ROOT"
