@@ -85,8 +85,15 @@ jobs:
             echo "missing CNB_PASSWORD secret"
             exit 1
           }
-          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
-          source_sha="$(git ls-remote "$source_url_auth" "refs/heads/$SOURCE_REF" | awk '{print $1}')"
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          source_sha="$(
+            git \
+              -c credential.helper= \
+              -c core.askPass= \
+              -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+              ls-remote "$SOURCE_URL" "refs/heads/$SOURCE_REF" \
+              | awk '{print $1}'
+          )"
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "failed to resolve source sha for $SOURCE_REF"
             exit 1
@@ -216,11 +223,15 @@ jobs:
             exit 1
           }
           build_root="${GITHUB_WORKSPACE}/build-src"
-          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
           rm -rf "$build_root"
           git init "$build_root"
-          git -C "$build_root" remote add origin "$source_url_auth"
-          git -C "$build_root" fetch --depth=1 origin "$SOURCE_SHA"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
       - name: Verify source layout
@@ -432,11 +443,15 @@ jobs:
             exit 1
           }
           build_root="${GITHUB_WORKSPACE}/build-src"
-          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
           rm -rf "$build_root"
           git init "$build_root"
-          git -C "$build_root" remote add origin "$source_url_auth"
-          git -C "$build_root" fetch --depth=1 origin "$SOURCE_SHA"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
       - name: Stage shared release assets
