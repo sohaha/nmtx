@@ -416,9 +416,9 @@ jobs:
       - resolve
       - build
     runs-on: ubuntu-latest
-    outputs:
-      should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
-      npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
+    # outputs:
+    #   should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
+    #   npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
     permissions:
       actions: read
       contents: write
@@ -458,99 +458,99 @@ jobs:
             fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
-      - name: Verify source layout for release packaging
-        shell: bash
-        run: |
-          set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
-          [[ -f "${build_root}/package.json" ]] || exit 1
-          [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
-          [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
-          [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
+      # - name: Verify source layout for release packaging
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     build_root="${GITHUB_WORKSPACE}/build-src"
+      #     [[ -f "${build_root}/package.json" ]] || exit 1
+      #     [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
+      #     [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
+      #     [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
 
-      - name: Determine npm publish settings
-        id: npm_publish_settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          required_targets=(
-            "x86_64-pc-windows-msvc"
-            "aarch64-apple-darwin"
-            "x86_64-apple-darwin"
-            "x86_64-unknown-linux-musl"
-            "aarch64-unknown-linux-musl"
-          )
-          declare -A selected_targets=()
-          IFS=',' read -r -a requested_targets <<< "$TARGETS"
-          for target in "${requested_targets[@]}"; do
-            selected_targets["$target"]=1
-          done
+      # - name: Determine npm publish settings
+      #   id: npm_publish_settings
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     required_targets=(
+      #       "x86_64-pc-windows-msvc"
+      #       "aarch64-apple-darwin"
+      #       "x86_64-apple-darwin"
+      #       "x86_64-unknown-linux-musl"
+      #       "aarch64-unknown-linux-musl"
+      #     )
+      #     declare -A selected_targets=()
+      #     IFS=',' read -r -a requested_targets <<< "$TARGETS"
+      #     for target in "${requested_targets[@]}"; do
+      #       selected_targets["$target"]=1
+      #     done
+      #
+      #     has_full_release_matrix=true
+      #     if [[ "${#selected_targets[@]}" -ne "${#required_targets[@]}" ]]; then
+      #       has_full_release_matrix=false
+      #     else
+      #       for target in "${required_targets[@]}"; do
+      #         if [[ -z "${selected_targets[$target]:-}" ]]; then
+      #           has_full_release_matrix=false
+      #           break
+      #         fi
+      #       done
+      #     fi
+      #
+      #     version="$RELEASE_VERSION"
+      #     if [[ "$has_full_release_matrix" != "true" ]]; then
+      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
+      #     else
+      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     fi
 
-          has_full_release_matrix=true
-          if [[ "${#selected_targets[@]}" -ne "${#required_targets[@]}" ]]; then
-            has_full_release_matrix=false
-          else
-            for target in "${required_targets[@]}"; do
-              if [[ -z "${selected_targets[$target]:-}" ]]; then
-                has_full_release_matrix=false
-                break
-              fi
-            done
-          fi
-
-          version="$RELEASE_VERSION"
-          if [[ "$has_full_release_matrix" != "true" ]]; then
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            echo "npm_tag=" >> "$GITHUB_OUTPUT"
-          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
-            echo "npm_tag=" >> "$GITHUB_OUTPUT"
-          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
-            echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_publish=false" >> "$GITHUB_OUTPUT"
-            echo "npm_tag=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup pnpm
-        if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Setup Node.js for npm packaging
-        if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Install dependencies for npm packaging
-        if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src"
-          pnpm install --frozen-lockfile
-
-      - name: Install DotSlash
-        if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-        uses: facebook/install-dotslash@v2
-
-      - name: Stage npm packages
-        if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src"
-          ./scripts/stage_npm_packages.py \
-            --workflow-url "$WORKFLOW_URL" \
-            --release-version "$RELEASE_VERSION" \
-            --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
-            --package codex
+      # - name: Setup pnpm
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: pnpm/action-setup@v4
+      #   with:
+      #     run_install: false
+      #
+      # - name: Setup Node.js for npm packaging
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: actions/setup-node@v6
+      #   with:
+      #     node-version: 22
+      #
+      # - name: Install dependencies for npm packaging
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     cd "${GITHUB_WORKSPACE}/build-src"
+      #     pnpm install --frozen-lockfile
+      #
+      # - name: Install DotSlash
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: facebook/install-dotslash@v2
+      #
+      # - name: Stage npm packages
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   shell: bash
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #     WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      #   run: |
+      #     set -euo pipefail
+      #     cd "${GITHUB_WORKSPACE}/build-src"
+      #     ./scripts/stage_npm_packages.py \
+      #       --workflow-url "$WORKFLOW_URL" \
+      #       --release-version "$RELEASE_VERSION" \
+      #       --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
+      #       --package codex
 
       - name: Stage shared release assets
         shell: bash
@@ -611,124 +611,46 @@ jobs:
           }
           gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$RELEASE_REPO" --clobber
 
-  publish-npm:
-    if: ${{ needs.release.outputs.should_publish_npm == 'true' }}
+  bark-notify:
+    if: ${{ always() }}
     needs:
       - resolve
+      - build
       - release
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
-    env:
-      RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
-      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
-      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-      NPM_TAG: ${{ needs.release.outputs.npm_tag }}
     steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          scope: '@sohaha'
-
-      - name: Update npm
-        shell: bash
-        run: npm install -g npm@latest
-
-      - name: Resolve GitHub release token
+      - name: Send Bark notification
+        if: ${{ secrets.BARK_URL != '' }}
+        continue-on-error: true
         shell: bash
         env:
-          RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
-          GITHUB_ACTIONS_TOKEN: ${{ github.token }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
         run: |
           set -euo pipefail
-          gh_token="${RELEASE_WRITE_TOKEN:-}"
-          if [[ -z "$gh_token" ]]; then
-            gh_token="${GITHUB_ACTIONS_TOKEN:-}"
+          status="success"
+          if [[ "$RESOLVE_RESULT" != "success" || "$BUILD_RESULT" != "success" || "$RELEASE_RESULT" != "success" ]]; then
+            status="failed"
           fi
-          [[ -n "$gh_token" ]] || {
-            echo "missing GitHub release token"
-            exit 1
-          }
-          echo "GH_TOKEN=$gh_token" >> "$GITHUB_ENV"
 
-      - name: Download npm tarballs from release
+          title="codex ci ${status}"
+          body="repo=${{ github.repository }} ref=${{ github.ref_name }} run=${{ github.run_number }} resolve=${RESOLVE_RESULT} build=${BUILD_RESULT} release=${RELEASE_RESULT}"
+          curl -fsS -X POST "$BARK_URL" \
+            --data-urlencode "title=${title}" \
+            --data-urlencode "body=${body}" \
+            --data-urlencode "url=${WORKFLOW_URL}" \
+            --data-urlencode "group=github-actions" \
+            --data-urlencode "level=active"
+
+      - name: Skip Bark when secret missing
+        if: ${{ secrets.BARK_URL == '' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/npm
-          patterns=(
-            "codex-npm-${RELEASE_VERSION}.tgz"
-            "codex-npm-linux-*-${RELEASE_VERSION}.tgz"
-            "codex-npm-darwin-*-${RELEASE_VERSION}.tgz"
-            "codex-npm-win32-*-${RELEASE_VERSION}.tgz"
-          )
-          for pattern in "${patterns[@]}"; do
-            gh release download "$RELEASE_TAG" \
-              --repo "$RELEASE_REPO" \
-              --pattern "$pattern" \
-              --dir dist/npm
-          done
+        run: echo "BARK_URL secret is empty, skip Bark notification."
 
-      - name: Publish to npm
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          prefix=""
-          if [[ -n "$NPM_TAG" ]]; then
-            prefix="${NPM_TAG}-"
-          fi
-
-          shopt -s nullglob
-          tarballs=(dist/npm/*-"${RELEASE_VERSION}".tgz)
-          if [[ ${#tarballs[@]} -eq 0 ]]; then
-            echo "No npm tarballs found in dist/npm for version ${RELEASE_VERSION}"
-            exit 1
-          fi
-
-          for tarball in "${tarballs[@]}"; do
-            filename="$(basename "${tarball}")"
-            tag=""
-
-            case "${filename}" in
-              codex-npm-linux-*-"${RELEASE_VERSION}".tgz|codex-npm-darwin-*-"${RELEASE_VERSION}".tgz|codex-npm-win32-*-"${RELEASE_VERSION}".tgz)
-                platform="${filename#codex-npm-}"
-                platform="${platform%-${RELEASE_VERSION}.tgz}"
-                tag="${prefix}${platform}"
-                ;;
-              codex-npm-"${RELEASE_VERSION}".tgz)
-                tag="${NPM_TAG}"
-                ;;
-              *)
-                echo "Unexpected npm tarball: ${filename}"
-                exit 1
-                ;;
-            esac
-
-            publish_cmd=(npm publish "${GITHUB_WORKSPACE}/${tarball}")
-            if [[ -n "$tag" ]]; then
-              publish_cmd+=(--tag "$tag")
-            fi
-
-            echo "+ ${publish_cmd[*]}"
-            set +e
-            publish_output="$("${publish_cmd[@]}" 2>&1)"
-            publish_status=$?
-            set -e
-
-            echo "${publish_output}"
-            if [[ ${publish_status} -eq 0 ]]; then
-              continue
-            fi
-
-            if grep -qiE "previously published|cannot publish over|version already exists" <<< "${publish_output}"; then
-              echo "Skipping already-published package version for ${filename}"
-              continue
-            fi
-
-            exit "${publish_status}"
-          done
+  # publish-npm:
+  #   npm 发布相关操作已临时注释，后续恢复时请回滚该注释块。
