@@ -620,13 +620,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      BARK_URL: ${{ secrets.BARK_URL }}
     steps:
       - name: Send Bark notification
-        if: ${{ secrets.BARK_URL != '' }}
+        if: ${{ env.BARK_URL != '' }}
         continue-on-error: true
         shell: bash
         env:
-          BARK_URL: ${{ secrets.BARK_URL }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           BUILD_RESULT: ${{ needs.build.result }}
@@ -648,7 +649,7 @@ jobs:
             --data-urlencode "level=active"
 
       - name: Skip Bark when secret missing
-        if: ${{ secrets.BARK_URL == '' }}
+        if: ${{ env.BARK_URL == '' }}
         shell: bash
         run: echo "BARK_URL secret is empty, skip Bark notification."
 
