@@ -76,11 +76,17 @@ jobs:
         id: source
         shell: bash
         env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
           SOURCE_URL: ${{ steps.payload.outputs.source_url }}
           SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
         run: |
           set -euo pipefail
-          source_sha="$(git ls-remote "$SOURCE_URL" "refs/heads/$SOURCE_REF" | awk '{print $1}')"
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
+          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
+          source_sha="$(git ls-remote "$source_url_auth" "refs/heads/$SOURCE_REF" | awk '{print $1}')"
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "failed to resolve source sha for $SOURCE_REF"
             exit 1
@@ -201,12 +207,19 @@ jobs:
 
       - name: Fetch source at exact SHA
         shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
         run: |
           set -euo pipefail
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
           build_root="${GITHUB_WORKSPACE}/build-src"
+          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
           rm -rf "$build_root"
           git init "$build_root"
-          git -C "$build_root" remote add origin "$SOURCE_URL"
+          git -C "$build_root" remote add origin "$source_url_auth"
           git -C "$build_root" fetch --depth=1 origin "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
@@ -410,12 +423,19 @@ jobs:
 
       - name: Fetch source metadata
         shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
         run: |
           set -euo pipefail
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
           build_root="${GITHUB_WORKSPACE}/build-src"
+          source_url_auth="${SOURCE_URL/https:\/\//https://cnb:${CNB_PASSWORD}@}"
           rm -rf "$build_root"
           git init "$build_root"
-          git -C "$build_root" remote add origin "$SOURCE_URL"
+          git -C "$build_root" remote add origin "$source_url_auth"
           git -C "$build_root" fetch --depth=1 origin "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
