@@ -1,6 +1,6 @@
 name: Build Codex Release
 
-on:
+'on':
   repository_dispatch:
     types: [build-codex-release]
   workflow_dispatch:
