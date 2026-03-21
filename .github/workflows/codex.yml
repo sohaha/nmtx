@@ -477,10 +477,25 @@ jobs:
           } > "$notes_path"
           echo "RELEASE_NOTES=$notes_path" >> "$GITHUB_ENV"
 
-      - name: Create or update GitHub release
+      - name: Resolve GitHub release token
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN || github.token }}
+          RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_ACTIONS_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh_token="${RELEASE_WRITE_TOKEN:-}"
+          if [[ -z "$gh_token" ]]; then
+            gh_token="${GITHUB_ACTIONS_TOKEN:-}"
+          fi
+          [[ -n "$gh_token" ]] || {
+            echo "missing GitHub release token"
+            exit 1
+          }
+          echo "GH_TOKEN=$gh_token" >> "$GITHUB_ENV"
+
+      - name: Create or update GitHub release
+        shell: bash
         run: |
           set -euo pipefail
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
@@ -489,8 +504,6 @@ jobs:
 
       - name: Upload release assets
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           mapfile -t files < <(find dist -type f | sort)
