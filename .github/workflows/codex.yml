@@ -1,0 +1,657 @@
+name: Build Codex Release
+
+'on':
+  repository_dispatch:
+    types: [build-codex-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+        description: Release version, for example 1.2.3 or 1.2.3-alpha.1
+      source_ref:
+        required: true
+        type: string
+        default: web
+        description: Source branch to build. Only web is allowed.
+      release_tag:
+        required: false
+        type: string
+        description: Optional GitHub release tag. Defaults to v<version>.
+      targets:
+        required: false
+        type: string
+        default: all
+        description: Optional comma-separated targets. Supports windows, mac, linux, all.
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/zcodex
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_url: ${{ steps.payload.outputs.source_url }}
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      targets: ${{ steps.targets.outputs.targets }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+            echo "source_ref=${{ github.event.client_payload.source_ref || 'web' }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${{ github.event.client_payload.release_tag }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ github.event.client_payload.targets || 'all' }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "source_url=https://cnb.cool/zls_nmtx/sohaha/zcodex" >> "$GITHUB_OUTPUT"
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ steps.payload.outputs.source_url }}" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_ref }}" == "web" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zcodex" ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          SOURCE_URL: ${{ steps.payload.outputs.source_url }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          source_sha="$(
+            git \
+              -c credential.helper= \
+              -c core.askPass= \
+              -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+              ls-remote "$SOURCE_URL" "refs/heads/$SOURCE_REF" \
+              | awk '{print $1}'
+          )"
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "failed to resolve source sha for $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag='${{ steps.payload.outputs.release_tag }}'
+          if [[ -z "$release_tag" ]]; then
+            release_tag="v${{ steps.payload.outputs.version }}"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_targets='${{ steps.payload.outputs.targets_input }}'
+          raw_targets="${raw_targets//[[:space:]]/}"
+          [[ -n "$raw_targets" ]] || raw_targets="all"
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$raw_targets"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              windows)
+                expanded=("x86_64-pc-windows-msvc|windows-latest")
+                ;;
+              mac)
+                expanded=("aarch64-apple-darwin|macos-latest" "x86_64-apple-darwin|macos-latest")
+                ;;
+              linux)
+                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04" "aarch64-unknown-linux-musl|ubuntu-24.04-arm")
+                ;;
+              all)
+                expanded=(
+                  "x86_64-pc-windows-msvc|windows-latest"
+                  "aarch64-apple-darwin|macos-latest"
+                  "x86_64-apple-darwin|macos-latest"
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
+                )
+                ;;
+              x86_64-pc-windows-msvc)
+                expanded=("x86_64-pc-windows-msvc|windows-latest")
+                ;;
+              aarch64-apple-darwin)
+                expanded=("aarch64-apple-darwin|macos-latest")
+                ;;
+              x86_64-apple-darwin)
+                expanded=("x86_64-apple-darwin|macos-latest")
+                ;;
+              x86_64-unknown-linux-musl)
+                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-musl)
+                expanded=("aarch64-unknown-linux-musl|ubuntu-24.04-arm")
+                ;;
+              *)
+                echo "invalid target: $item"
+                exit 1
+                ;;
+            esac
+
+            for pair in "${expanded[@]}"; do
+              target="${pair%%|*}"
+              runner="${pair##*|}"
+              if [[ -z "${seen[$target]:-}" ]]; then
+                seen[$target]=1
+                normalized+=("$target|$runner")
+              fi
+            done
+          done
+
+          targets_csv=""
+          matrix="["
+          for pair in "${normalized[@]}"; do
+            target="${pair%%|*}"
+            runner="${pair##*|}"
+            if [[ -n "$targets_csv" ]]; then
+              targets_csv+=","
+            fi
+            targets_csv+="$target"
+            matrix+="{\"target\":\"$target\",\"runner\":\"$runner\"},"
+          done
+          matrix="${matrix%,}]"
+
+          echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v4
+
+      - name: Fetch source at exact SHA
+        shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      - name: Verify source layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          [[ -f "${build_root}/codex-rs/Cargo.toml" ]] || exit 1
+          [[ -f "${build_root}/.github/scripts/install-musl-build-tools.sh" ]] || exit 1
+          [[ -f "${build_root}/scripts/install/install.sh" ]] || exit 1
+          [[ -f "${build_root}/scripts/install/install.ps1" ]] || exit 1
+
+      - name: Sync Cargo workspace version from release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["RELEASE_VERSION"]
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?", version) is None:
+              raise SystemExit(f"unsupported release version: {version}")
+
+          cargo_toml = pathlib.Path("Cargo.toml")
+          content = cargo_toml.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              content,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update workspace version in Cargo.toml")
+          cargo_toml.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev binutils
+
+      - name: Install UBSan runtime
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libubsan1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Use hermetic Cargo home
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install musl build tools
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Configure rustc UBSan wrapper
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+          sanitize_flags() {
+            local input="$1"
+            input="${input//-fsanitize=undefined/}"
+            input="${input//-fno-sanitize-recover=undefined/}"
+            input="${input//-fno-sanitize-trap=undefined/}"
+            echo "$input"
+          }
+
+          echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+
+          dest="dist/${TARGET}"
+          mkdir -p "$dest"
+          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
+          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+
+      - name: Compress artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          dest="dist/${TARGET}"
+          for f in "$dest"/*; do
+            base="$(basename "$f")"
+            if [[ "$base" == *.tar.gz || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
+              continue
+            fi
+            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
+            if command -v zstd >/dev/null 2>&1; then
+              zstd -T0 -19 "$dest/$base"
+            fi
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              (cd "$dest" && 7z a "${base}.zip" "$base")
+            fi
+          done
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TARGET }}
+          path: ${{ github.workspace }}/build-src/codex-rs/dist/${{ env.TARGET }}/*
+
+  release:
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-latest
+    # outputs:
+    #   should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
+    #   npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
+    permissions:
+      actions: read
+      contents: write
+    env:
+      SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      SOURCE_REF: ${{ needs.resolve.outputs.source_ref }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
+      TARGETS: ${{ needs.resolve.outputs.targets }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Fetch source metadata
+        shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CNB_PASSWORD" ]] || {
+            echo "missing CNB_PASSWORD secret"
+            exit 1
+          }
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      # - name: Verify source layout for release packaging
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     build_root="${GITHUB_WORKSPACE}/build-src"
+      #     [[ -f "${build_root}/package.json" ]] || exit 1
+      #     [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
+      #     [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
+      #     [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
+
+      # - name: Determine npm publish settings
+      #   id: npm_publish_settings
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     required_targets=(
+      #       "x86_64-pc-windows-msvc"
+      #       "aarch64-apple-darwin"
+      #       "x86_64-apple-darwin"
+      #       "x86_64-unknown-linux-musl"
+      #       "aarch64-unknown-linux-musl"
+      #     )
+      #     declare -A selected_targets=()
+      #     IFS=',' read -r -a requested_targets <<< "$TARGETS"
+      #     for target in "${requested_targets[@]}"; do
+      #       selected_targets["$target"]=1
+      #     done
+      #
+      #     has_full_release_matrix=true
+      #     if [[ "${#selected_targets[@]}" -ne "${#required_targets[@]}" ]]; then
+      #       has_full_release_matrix=false
+      #     else
+      #       for target in "${required_targets[@]}"; do
+      #         if [[ -z "${selected_targets[$target]:-}" ]]; then
+      #           has_full_release_matrix=false
+      #           break
+      #         fi
+      #       done
+      #     fi
+      #
+      #     version="$RELEASE_VERSION"
+      #     if [[ "$has_full_release_matrix" != "true" ]]; then
+      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
+      #     else
+      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
+      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
+      #     fi
+
+      # - name: Setup pnpm
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: pnpm/action-setup@v4
+      #   with:
+      #     run_install: false
+      #
+      # - name: Setup Node.js for npm packaging
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: actions/setup-node@v6
+      #   with:
+      #     node-version: 22
+      #
+      # - name: Install dependencies for npm packaging
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     cd "${GITHUB_WORKSPACE}/build-src"
+      #     pnpm install --frozen-lockfile
+      #
+      # - name: Install DotSlash
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   uses: facebook/install-dotslash@v2
+      #
+      # - name: Stage npm packages
+      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
+      #   shell: bash
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #     WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      #   run: |
+      #     set -euo pipefail
+      #     cd "${GITHUB_WORKSPACE}/build-src"
+      #     ./scripts/stage_npm_packages.py \
+      #       --workflow-url "$WORKFLOW_URL" \
+      #       --release-version "$RELEASE_VERSION" \
+      #       --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
+      #       --package codex
+
+      - name: Stage shared release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          cp "${build_root}/scripts/install/install.sh" dist/install.sh
+          cp "${build_root}/scripts/install/install.ps1" dist/install.ps1
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Automated build from ${SOURCE_URL}"
+            echo
+            echo "- source ref: \`${SOURCE_REF}\`"
+            echo "- source sha: \`${SOURCE_SHA}\`"
+            echo "- version: \`${RELEASE_VERSION}\`"
+            echo "- targets: \`${TARGETS}\`"
+          } > "$notes_path"
+          echo "RELEASE_NOTES=$notes_path" >> "$GITHUB_ENV"
+
+      - name: Resolve GitHub release token
+        shell: bash
+        env:
+          RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_ACTIONS_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh_token="${RELEASE_WRITE_TOKEN:-}"
+          if [[ -z "$gh_token" ]]; then
+            gh_token="${GITHUB_ACTIONS_TOKEN:-}"
+          fi
+          [[ -n "$gh_token" ]] || {
+            echo "missing GitHub release token"
+            exit 1
+          }
+          echo "GH_TOKEN=$gh_token" >> "$GITHUB_ENV"
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$RELEASE_REPO" --title "$RELEASE_VERSION" --notes-file "$RELEASE_NOTES"
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --title "$RELEASE_VERSION" --notes-file "$RELEASE_NOTES"
+
+      - name: Upload release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find dist -type f | sort)
+          [[ "${#files[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$RELEASE_REPO" --clobber
+
+  bark-notify:
+    if: ${{ always() }}
+    needs:
+      - resolve
+      - build
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BARK_URL: ${{ secrets.BARK_URL }}
+    steps:
+      - name: Send Bark notification
+        if: ${{ env.BARK_URL != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+        run: |
+          set -euo pipefail
+          status="success"
+          if [[ "$RESOLVE_RESULT" != "success" || "$BUILD_RESULT" != "success" || "$RELEASE_RESULT" != "success" ]]; then
+            status="failed"
+          fi
+
+          title="codex ci ${status}"
+          body="repo=${{ github.repository }} ref=${{ github.ref_name }} run=${{ github.run_number }} resolve=${RESOLVE_RESULT} build=${BUILD_RESULT} release=${RELEASE_RESULT}"
+          curl -fsS -X POST "$BARK_URL" \
+            --data-urlencode "title=${title}" \
+            --data-urlencode "body=${body}" \
+            --data-urlencode "url=${WORKFLOW_URL}" \
+            --data-urlencode "group=github-actions" \
+            --data-urlencode "level=active"
+
+      - name: Skip Bark when secret missing
+        if: ${{ env.BARK_URL == '' }}
+        shell: bash
+        run: echo "BARK_URL secret is empty, skip Bark notification."
+
+  # publish-npm:
+  #   npm 发布相关操作已临时注释，后续恢复时请回滚该注释块。

@@ -1,0 +1,332 @@
+name: Build Codebay Release
+
+on:
+  repository_dispatch:
+    types: [build-codebay-release]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        required: true
+        type: string
+        default: sohaha/codebay
+      source_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      target:
+        required: true
+        type: choice
+        options:
+          - win-x64
+          - mac-arm64
+          - mac-x64
+      targets:
+        required: false
+        type: string
+        description: "Optional comma-separated targets. Supports mac alias and normalizes win-64 to win-x64."
+      channel:
+        required: true
+        type: choice
+        options:
+          - latest
+          - canary
+        default: latest
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/codebay-releases
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_repo: ${{ steps.payload.outputs.source_repo }}
+      source_sha: ${{ steps.payload.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      targets: ${{ steps.targets.outputs.targets }}
+      channel: ${{ steps.payload.outputs.channel }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ github.event.client_payload.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ github.event.client_payload.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ github.event.client_payload.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ github.event.client_payload.release_repo }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_repo=${{ inputs.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/codebay" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codebay-releases" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.channel }}" =~ ^(latest|canary)$ ]] || exit 1
+
+      - name: Normalize targets
+        id: targets
+        shell: bash
+        run: |
+          RAW_TARGETS='${{ steps.payload.outputs.targets_input }}'
+          if [[ -z "$RAW_TARGETS" ]]; then
+            RAW_TARGETS='${{ steps.payload.outputs.target }}'
+          fi
+
+          RAW_TARGETS="${RAW_TARGETS//[[:space:]]/}"
+          [[ -n "$RAW_TARGETS" ]] || {
+            echo "missing target(s)"
+            exit 1
+          }
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$RAW_TARGETS"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              mac)
+                expanded=("mac-arm64" "mac-x64")
+                ;;
+              win-64)
+                expanded=("win-x64")
+                ;;
+              all)
+                expanded=("win-x64" "mac-arm64" "mac-x64")
+                ;;
+              win-x64|mac-arm64|mac-x64)
+                expanded=("$item")
+                ;;
+              *)
+                echo "invalid target: $item"
+                exit 1
+                ;;
+            esac
+
+            for expanded_target in "${expanded[@]}"; do
+              if [[ -z "${seen[$expanded_target]:-}" ]]; then
+                seen[$expanded_target]=1
+                normalized+=("$expanded_target")
+              fi
+            done
+          done
+
+          targets_csv="$(IFS=,; echo "${normalized[*]}")"
+          matrix="["
+          for normalized_target in "${normalized[@]}"; do
+            runner="macos-latest"
+            if [[ "$normalized_target" == "win-x64" ]]; then
+              runner="windows-latest"
+            fi
+            matrix+="{\"target\":\"$normalized_target\",\"runner\":\"$runner\"},"
+          done
+          matrix="${matrix%,}]"
+
+          echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Setup mise
+        uses: jdx/mise-action@v2
+
+      - name: Fetch source at exact SHA
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $repo = '${{ needs.resolve.outputs.source_repo }}'
+          $sha = '${{ needs.resolve.outputs.source_sha }}'
+          $remoteUrl = "https://github.com/$repo.git"
+
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
+          }
+          New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+
+          Set-Location $buildRoot
+          git init
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to initialize source workspace"
+          }
+
+          git remote add origin $remoteUrl
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to configure source remote"
+          }
+
+          $basicAuthToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:SOURCE_TOKEN"))
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic $basicAuthToken" fetch --depth=1 origin $sha
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to fetch source commit"
+          }
+
+          git checkout --force FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to checkout source commit"
+          }
+
+          Remove-Item -Recurse -Force (Join-Path $buildRoot ".git")
+
+      - name: Verify source layout
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
+          if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
+
+      - name: Install node-gyp for Windows Bun install
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          $nodeGypVersion = node -p "require('./package.json').devDependencies['node-gyp']"
+          if ([string]::IsNullOrWhiteSpace($nodeGypVersion)) {
+            throw "missing node-gyp version in package.json"
+          }
+          npm install --global "node-gyp@$nodeGypVersion"
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to install global node-gyp"
+          }
+
+      - name: Install dependencies on Windows
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $env:BUN_INSTALL_CACHE_DIR = Join-Path $env:GITHUB_WORKSPACE ".bun-install-cache"
+          Set-Location $buildRoot
+          bun install --frozen-lockfile
+
+      - name: Install dependencies on macOS
+        if: ${{ matrix.target != 'win-x64' }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun install --frozen-lockfile
+
+      - name: Update app version
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
+
+      - name: Build Windows release
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          mise run release-win-x64
+
+      - name: Build macOS arm64 release
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          mise run release-mac-arm64
+
+      - name: Build macOS x64 release
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          mise run release-mac-x64
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          $releaseDir = "apps/desktop/release"
+          if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
+
+          $patterns = @("*.exe", "*.dmg", "*.zip", "*.7z", "*.yml", "*.blockmap")
+          $files = foreach ($pattern in $patterns) {
+            Get-ChildItem -Path $releaseDir -Filter $pattern -File -Recurse | Select-Object -ExpandProperty FullName
+          }
+
+          if (-not $files -or $files.Count -eq 0) {
+            throw "no release assets found"
+          }
+
+          $files | Set-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
+
+      - name: Upload to codebay-releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          $version = '${{ needs.resolve.outputs.version }}'
+          $channel = '${{ needs.resolve.outputs.channel }}'
+          $releaseRepo = '${{ needs.resolve.outputs.release_repo }}'
+          $tag = if ($channel -eq 'latest') { "v$version" } else { "v$version-$channel" }
+          $releaseFiles = Get-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
+
+          gh release view $tag --repo $releaseRepo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $releaseRepo --title $tag --notes "Automated release for $tag"
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag --repo $releaseRepo *> $null
+              if ($LASTEXITCODE -ne 0) {
+                throw "failed to create release: $tag"
+              }
+            }
+          }
+
+          foreach ($file in $releaseFiles) {
+            gh release upload $tag $file --repo $releaseRepo --clobber
+          }
+
+      - name: Cleanup source
+        if: always()
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
+          }
