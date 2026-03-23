@@ -394,7 +394,11 @@ jobs:
             binary_path="${bin_dir}/${bin}"
             file "${binary_path}"
             readelf -l "${binary_path}" | grep 'Requesting program interpreter' || true
-            "${binary_path}" --version
+            if [[ "${bin}" == "codex-responses-api-proxy" ]]; then
+              "${binary_path}" --help >/dev/null
+            else
+              "${binary_path}" --version
+            fi
           done
 
       - name: Stage artifacts
