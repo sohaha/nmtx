@@ -195,6 +195,35 @@ jobs:
           echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
+      - name: Validate macOS signing secrets
+        if: ${{ contains(steps.targets.outputs.targets, 'apple-darwin') }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
   build:
     needs: resolve
     strategy:
@@ -373,6 +402,15 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
 
+      - name: Smoke test macOS artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          "target/${TARGET}/release/codex" --version
+          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+
       - name: Smoke test Linux artifacts
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -391,6 +429,89 @@ jobs:
             fi
           done
 
+      - name: MacOS code signing (binaries)
+        if: ${{ runner.os == 'macOS' }}
+        uses: ./.github/actions/macos-code-sign
+        with:
+          project-root: build-src/codex-rs
+          target: ${{ env.TARGET }}
+          sign-binaries: "true"
+          sign-dmg: "false"
+          apple-certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-notarization-key-p8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          apple-notarization-key-id: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+
+      - name: Build macOS dmg
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+
+          release_dir="target/${TARGET}/release"
+          dmg_root="${RUNNER_TEMP}/codex-dmg-root"
+          dmg_path="${release_dir}/codex-${TARGET}.dmg"
+          volname="Codex (${TARGET})"
+
+          codex_binary_path="${release_dir}/codex"
+          proxy_binary_path="${release_dir}/codex-responses-api-proxy"
+
+          [[ -f "$codex_binary_path" ]] || {
+            echo "binary $codex_binary_path not found"
+            exit 1
+          }
+          [[ -f "$proxy_binary_path" ]] || {
+            echo "binary $proxy_binary_path not found"
+            exit 1
+          }
+
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          ditto "$codex_binary_path" "${dmg_root}/codex"
+          ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
+
+          rm -f "$dmg_path"
+          hdiutil create \
+            -volname "$volname" \
+            -srcfolder "$dmg_root" \
+            -format UDZO \
+            -ov \
+            "$dmg_path"
+
+          [[ -f "$dmg_path" ]] || {
+            echo "dmg $dmg_path not found after build"
+            exit 1
+          }
+
+      - name: MacOS code signing (dmg)
+        if: ${{ runner.os == 'macOS' }}
+        uses: ./.github/actions/macos-code-sign
+        with:
+          project-root: build-src/codex-rs
+          target: ${{ env.TARGET }}
+          sign-binaries: "false"
+          sign-dmg: "true"
+          apple-certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-notarization-key-p8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          apple-notarization-key-id: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+
+      - name: Verify macOS signed artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="target/${TARGET}/release"
+          for binary in codex codex-responses-api-proxy; do
+            codesign --verify --strict --verbose=2 "${release_dir}/${binary}"
+          done
+          codesign --verify --verbose=2 "${release_dir}/codex-${TARGET}.dmg"
+          xcrun stapler validate "${release_dir}/codex-${TARGET}.dmg"
+
       - name: Stage artifacts
         shell: bash
         run: |
@@ -405,6 +526,9 @@ jobs:
           mkdir -p "$dest"
           cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
           cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            cp "target/${TARGET}/release/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
+          fi
 
       - name: Compress artifacts
         shell: bash
