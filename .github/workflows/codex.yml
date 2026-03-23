@@ -134,13 +134,20 @@ jobs:
                 expanded=("aarch64-apple-darwin|macos-latest" "x86_64-apple-darwin|macos-latest")
                 ;;
               linux)
-                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04" "aarch64-unknown-linux-musl|ubuntu-24.04-arm")
+                expanded=(
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
+                )
                 ;;
               all)
                 expanded=(
                   "x86_64-pc-windows-msvc|windows-latest"
                   "aarch64-apple-darwin|macos-latest"
                   "x86_64-apple-darwin|macos-latest"
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                   "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                 )
@@ -153,6 +160,12 @@ jobs:
                 ;;
               x86_64-apple-darwin)
                 expanded=("x86_64-apple-darwin|macos-latest")
+                ;;
+              x86_64-unknown-linux-gnu)
+                expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-gnu)
+                expanded=("aarch64-unknown-linux-gnu|ubuntu-24.04-arm")
                 ;;
               x86_64-unknown-linux-musl)
                 expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
@@ -370,6 +383,20 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
 
+      - name: Smoke test Linux artifacts
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          bin_dir="target/${TARGET}/release"
+          for bin in codex codex-responses-api-proxy; do
+            binary_path="${bin_dir}/${bin}"
+            file "${binary_path}"
+            readelf -l "${binary_path}" | grep 'Requesting program interpreter' || true
+            "${binary_path}" --version
+          done
+
       - name: Stage artifacts
         shell: bash
         run: |
@@ -477,6 +504,8 @@ jobs:
       #       "x86_64-pc-windows-msvc"
       #       "aarch64-apple-darwin"
       #       "x86_64-apple-darwin"
+      #       "x86_64-unknown-linux-gnu"
+      #       "aarch64-unknown-linux-gnu"
       #       "x86_64-unknown-linux-musl"
       #       "aarch64-unknown-linux-musl"
       #     )
