@@ -588,14 +588,7 @@ jobs:
         run: |
           set -euo pipefail
           notes_path="${RUNNER_TEMP}/release-notes.md"
-          {
-            echo "Automated build from ${SOURCE_URL}"
-            echo
-            echo "- source ref: \`${SOURCE_REF}\`"
-            echo "- source sha: \`${SOURCE_SHA}\`"
-            echo "- version: \`${RELEASE_VERSION}\`"
-            echo "- targets: \`${TARGETS}\`"
-          } > "$notes_path"
+          : > "$notes_path"
           echo "RELEASE_NOTES=$notes_path" >> "$GITHUB_ENV"
 
       - name: Resolve GitHub release token
