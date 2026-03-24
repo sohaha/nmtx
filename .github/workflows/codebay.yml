@@ -51,7 +51,7 @@ jobs:
       targets: ${{ steps.targets.outputs.targets }}
       channel: ${{ steps.payload.outputs.channel }}
       release_repo: ${{ steps.payload.outputs.release_repo }}
-      matrix: ${{ steps.targets.outputs.matrix }}
+      matrix: ${{ steps.targets.outputs.matrix || '{"include":[]}' }}
     steps:
       - name: Resolve payload
         id: payload
@@ -109,6 +109,8 @@ jobs:
         id: targets
         shell: bash
         run: |
+          set -euo pipefail
+
           RAW_TARGETS='${{ steps.payload.outputs.targets_input }}'
           if [[ -z "$RAW_TARGETS" ]]; then
             RAW_TARGETS='${{ steps.payload.outputs.target }}'
@@ -153,15 +155,20 @@ jobs:
           done
 
           targets_csv="$(IFS=,; echo "${normalized[*]}")"
-          matrix="["
+          matrix_entries=()
           for normalized_target in "${normalized[@]}"; do
             runner="macos-latest"
             if [[ "$normalized_target" == "win-x64" ]]; then
               runner="windows-latest"
             fi
-            matrix+="{\"target\":\"$normalized_target\",\"runner\":\"$runner\"},"
+            matrix_entries+=("{\"target\":\"$normalized_target\",\"runner\":\"$runner\"}")
           done
-          matrix="${matrix%,}]"
+
+          matrix='{"include":['
+          if [[ "${#matrix_entries[@]}" -gt 0 ]]; then
+            matrix+="$(IFS=,; echo "${matrix_entries[*]}")"
+          fi
+          matrix+=']}'
 
           echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
@@ -199,8 +206,7 @@ jobs:
     needs: resolve
     strategy:
       fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
 
     steps:
