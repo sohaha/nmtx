@@ -166,6 +166,35 @@ jobs:
           echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
+      - name: Validate macOS signing secrets
+        if: ${{ contains(steps.targets.outputs.targets, 'mac-arm64') || contains(steps.targets.outputs.targets, 'mac-x64') }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
   build:
     needs: resolve
     strategy:
@@ -285,6 +314,12 @@ jobs:
       - name: Build macOS arm64 release
         if: ${{ matrix.target == 'mac-arm64' }}
         shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
@@ -293,6 +328,12 @@ jobs:
       - name: Build macOS x64 release
         if: ${{ matrix.target == 'mac-x64' }}
         shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
