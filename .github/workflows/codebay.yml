@@ -275,19 +275,25 @@ jobs:
       - name: Patch legacy mac signing script compatibility
         if: ${{ matrix.target != 'win-x64' }}
         shell: bash
+        env:
+          SIGN_SCRIPT: ${{ github.workspace }}/build-src/apps/desktop/scripts/macos-signing-local.sh
         run: |
           set -euo pipefail
 
-          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
-          sign_script="${BUILD_ROOT}/apps/desktop/scripts/macos-signing-local.sh"
-
-          if [[ ! -f "$sign_script" ]]; then
+          if [[ ! -f "$SIGN_SCRIPT" ]]; then
             exit 0
           fi
 
-          sed -i.bak \
-            's|^LOGIN_KEYCHAIN=.*$|LOGIN_KEYCHAIN="${LOGIN_KEYCHAIN:-$(security default-keychain | sed '\''s/^ *"//; s/"$//'\'')}"|' \
-            "$sign_script"
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = process.env.SIGN_SCRIPT;
+          const nextLine = 'LOGIN_KEYCHAIN="${LOGIN_KEYCHAIN:-$(security default-keychain | sed \'s/^ *"//; s/"$//\')}"';
+          const current = fs.readFileSync(path, "utf8");
+          const patched = current.replace(/^LOGIN_KEYCHAIN=.*$/m, nextLine);
+          if (patched !== current) {
+            fs.writeFileSync(path, patched);
+          }
+          NODE
 
       - name: Install node-gyp for Windows Bun install
         if: ${{ matrix.target == 'win-x64' }}
