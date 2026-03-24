@@ -336,12 +336,23 @@ jobs:
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cert_path="${RUNNER_TEMP}/codebay-macos-signing-arm64.p12"
           notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-arm64.p8"
+          keychain_path="${RUNNER_TEMP}/codebay-signing-arm64.keychain-db"
+          keychain_password="actions"
 
           umask 077
           echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
           cat > "$notary_key_path" <<EOF
           $APPLE_NOTARIZATION_KEY_P8_CONTENT
           EOF
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -s "$keychain_path" $(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+          security default-keychain -s "$keychain_path"
+          security login-keychain -s "$keychain_path"
+          security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
 
           export APPLE_CERTIFICATE_P12="$cert_path"
           export MAC_CERTIFICATE="$cert_path"
@@ -366,12 +377,23 @@ jobs:
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cert_path="${RUNNER_TEMP}/codebay-macos-signing-x64.p12"
           notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-x64.p8"
+          keychain_path="${RUNNER_TEMP}/codebay-signing-x64.keychain-db"
+          keychain_password="actions"
 
           umask 077
           echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
           cat > "$notary_key_path" <<EOF
           $APPLE_NOTARIZATION_KEY_P8_CONTENT
           EOF
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -s "$keychain_path" $(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+          security default-keychain -s "$keychain_path"
+          security login-keychain -s "$keychain_path"
+          security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
 
           export APPLE_CERTIFICATE_P12="$cert_path"
           export MAC_CERTIFICATE="$cert_path"
