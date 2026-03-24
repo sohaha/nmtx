@@ -325,13 +325,29 @@ jobs:
         if: ${{ matrix.target == 'mac-arm64' }}
         shell: bash
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_P8_CONTENT: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: |
+          set -euo pipefail
+
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cert_path="${RUNNER_TEMP}/codebay-macos-signing-arm64.p12"
+          notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-arm64.p8"
+
+          umask 077
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+          cat > "$notary_key_path" <<EOF
+          $APPLE_NOTARIZATION_KEY_P8_CONTENT
+          EOF
+
+          export APPLE_CERTIFICATE_P12="$cert_path"
+          export MAC_CERTIFICATE="$cert_path"
+          export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
+          export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+
           cd "$BUILD_ROOT"
           mise run release-mac-arm64
 
@@ -339,13 +355,29 @@ jobs:
         if: ${{ matrix.target == 'mac-x64' }}
         shell: bash
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_P8_CONTENT: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: |
+          set -euo pipefail
+
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cert_path="${RUNNER_TEMP}/codebay-macos-signing-x64.p12"
+          notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-x64.p8"
+
+          umask 077
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+          cat > "$notary_key_path" <<EOF
+          $APPLE_NOTARIZATION_KEY_P8_CONTENT
+          EOF
+
+          export APPLE_CERTIFICATE_P12="$cert_path"
+          export MAC_CERTIFICATE="$cert_path"
+          export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
+          export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+
           cd "$BUILD_ROOT"
           mise run release-mac-x64
 
