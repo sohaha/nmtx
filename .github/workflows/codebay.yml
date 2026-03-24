@@ -206,8 +206,44 @@ jobs:
             exit 1
           fi
 
+  validate_source_access:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source commit is reachable on GitHub
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          repo='${{ needs.resolve.outputs.source_repo }}'
+          sha='${{ needs.resolve.outputs.source_sha }}'
+          api_url="https://api.github.com/repos/${repo}/commits/${sha}"
+          response_file="${RUNNER_TEMP}/source-commit-response.json"
+
+          status_code="$(
+            curl -sS \
+              -o "$response_file" \
+              -w "%{http_code}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$api_url"
+          )"
+
+          if [[ "$status_code" != "200" ]]; then
+            echo "source commit is not reachable on GitHub: ${repo}@${sha}"
+            echo "push this commit to https://github.com/${repo} before triggering the release workflow"
+            response="$(cat "$response_file" 2>/dev/null || true)"
+            if [[ -n "$response" ]]; then
+              echo "$response"
+            fi
+            exit 1
+          fi
+
   build:
-    needs: [resolve, validate_secrets]
+    needs: [resolve, validate_secrets, validate_source_access]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
@@ -254,7 +290,7 @@ jobs:
           $basicAuthToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:SOURCE_TOKEN"))
           git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic $basicAuthToken" fetch --depth=1 origin $sha
           if ($LASTEXITCODE -ne 0) {
-            throw "failed to fetch source commit"
+            throw "failed to fetch source commit from GitHub: $repo@$sha"
           }
 
           git checkout --force FETCH_HEAD
