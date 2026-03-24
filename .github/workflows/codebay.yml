@@ -466,46 +466,34 @@ jobs:
         shell: pwsh
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
-          Set-Location $buildRoot
-          $releaseDir = "apps/desktop/release"
+          $releaseDir = Join-Path $buildRoot "apps/desktop/release"
           if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
 
-          $patterns = @("*.exe", "*.dmg", "*.zip", "*.7z", "*.yml", "*.blockmap")
-          $files = foreach ($pattern in $patterns) {
-            Get-ChildItem -Path $releaseDir -Filter $pattern -File -Recurse | Select-Object -ExpandProperty FullName
+          $uploadDir = Join-Path $env:RUNNER_TEMP (Join-Path "release-upload" "${{ matrix.target }}")
+          if (Test-Path $uploadDir) {
+            Remove-Item -Recurse -Force $uploadDir
           }
+          New-Item -ItemType Directory -Force -Path $uploadDir | Out-Null
+
+          $allowedExtensions = @(".blockmap", ".dmg", ".exe", ".yml", ".zip", ".7z")
+          $files = Get-ChildItem -Path $releaseDir -File |
+            Where-Object { $allowedExtensions -contains $_.Extension } |
+            Select-Object -ExpandProperty FullName
 
           if (-not $files -or $files.Count -eq 0) {
             throw "no release assets found"
           }
 
-          $files | Set-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
-
-      - name: Upload to codebay-releases
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
-        run: |
-          $version = '${{ needs.resolve.outputs.version }}'
-          $channel = '${{ needs.resolve.outputs.channel }}'
-          $releaseRepo = '${{ needs.resolve.outputs.release_repo }}'
-          $tag = if ($channel -eq 'latest') { "v$version" } else { "v$version-$channel" }
-          $releaseFiles = Get-Content -Path (Join-Path $env:RUNNER_TEMP "release-files.txt")
-
-          gh release view $tag --repo $releaseRepo *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo $releaseRepo --title $tag --notes "Automated release for $tag"
-            if ($LASTEXITCODE -ne 0) {
-              gh release view $tag --repo $releaseRepo *> $null
-              if ($LASTEXITCODE -ne 0) {
-                throw "failed to create release: $tag"
-              }
-            }
+          foreach ($file in $files) {
+            Copy-Item -Path $file -Destination (Join-Path $uploadDir (Split-Path $file -Leaf)) -Force
           }
 
-          foreach ($file in $releaseFiles) {
-            gh release upload $tag $file --repo $releaseRepo --clobber
-          }
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-upload/${{ matrix.target }}
+          if-no-files-found: error
 
       - name: Cleanup source
         if: always()
@@ -515,3 +503,111 @@ jobs:
           if (Test-Path $buildRoot) {
             Remove-Item -Recurse -Force $buildRoot
           }
+
+  publish_release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v4
+
+      - name: Ensure release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$release_repo" --title "$tag" --notes "Automated release for $tag"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-artifacts
+
+      - name: Download existing mac manifests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          existing_dir="${RUNNER_TEMP}/existing-release"
+          mkdir -p "$existing_dir"
+          gh release download "$tag" \
+            --repo "$release_repo" \
+            --dir "$existing_dir" \
+            --pattern 'latest-mac-arm64.yml' \
+            --pattern 'latest-mac-x64.yml' || true
+
+      - name: Prepare merged release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-codebay-release-assets.mjs \
+            "${RUNNER_TEMP}/release-artifacts" \
+            "${RUNNER_TEMP}/release-publish" \
+            "${RUNNER_TEMP}/existing-release"
+
+      - name: Delete legacy stale assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          legacy_assets=(
+            "builder-debug.yml"
+            "Codebay.exe"
+            "elevate.exe"
+            "zclaw.exe"
+          )
+
+          for asset_name in "${legacy_assets[@]}"; do
+            gh release delete-asset "$tag" "$asset_name" --repo "$release_repo" --yes >/dev/null 2>&1 || true
+          done
+
+      - name: Upload to codebay-releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          while IFS= read -r -d '' file; do
+            gh release upload "$tag" "$file" --repo "$release_repo" --clobber
+          done < <(find "${RUNNER_TEMP}/release-publish" -maxdepth 1 -type f -print0 | sort -z)
