@@ -136,10 +136,21 @@ jobs:
           targets_csv="$(IFS=,; echo "${normalized[*]}")"
           matrix_entries=()
           for normalized_target in "${normalized[@]}"; do
-            runner="macos-latest"
-            if [[ "$normalized_target" == "win-x64" ]]; then
-              runner="windows-latest"
-            fi
+            case "$normalized_target" in
+              win-x64)
+                runner="windows-latest"
+                ;;
+              mac-arm64)
+                runner="macos-latest"
+                ;;
+              mac-x64)
+                runner="macos-15-intel"
+                ;;
+              *)
+                echo "unsupported target: $normalized_target"
+                exit 1
+                ;;
+            esac
             matrix_entries+=("{\"target\":\"$normalized_target\",\"runner\":\"$runner\"}")
           done
 
