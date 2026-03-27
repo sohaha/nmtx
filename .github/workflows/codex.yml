@@ -442,6 +442,50 @@ jobs:
               --bin codex-responses-api-proxy
           fi
 
+      - name: Verify GLIBC requirements (Ubuntu 22.04)
+        if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+
+          limit="2.35"
+
+          require_max_glibc() {
+            local bin="$1"
+            local dynamic_out=""
+
+            dynamic_out="$(readelf -W --dynamic "$bin" 2>&1 || true)"
+            if echo "$dynamic_out" | grep -q "There is no dynamic section"; then
+              echo "${bin} is statically linked; no GLIBC requirement to verify"
+              return 0
+            fi
+
+            local max=""
+            max="$(
+              readelf -W --version-info "$bin" \
+                | grep -oE 'GLIBC_[0-9]+[.][0-9]+([.][0-9]+)?' \
+                | sed 's/^GLIBC_//' \
+                | sort -V \
+                | tail -n 1 \
+                || true
+            )"
+            if [[ -z "${max}" ]]; then
+              echo "Failed to detect GLIBC symbol versions in ${bin}" >&2
+              echo "::group::readelf --dynamic ${bin}" >&2
+              echo "$dynamic_out" >&2
+              echo "::endgroup::" >&2
+              exit 1
+            fi
+            echo "${bin} max GLIBC: ${max}"
+            dpkg --compare-versions "${max}" le "${limit}" \
+              || { echo "❌ ${bin} requires GLIBC_${max} > GLIBC_${limit}" >&2; exit 1; }
+          }
+
+          require_max_glibc "target/${TARGET}/release/codex"
+          require_max_glibc "target/${TARGET}/release/codex-responses-api-proxy"
+          echo "✅ GLIBC requirements <= ${limit}"
+
       - name: Smoke test Windows artifacts
         if: ${{ runner.os == 'Windows' }}
         shell: bash
