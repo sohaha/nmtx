@@ -251,6 +251,7 @@ jobs:
       SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
 
     steps:
       - name: Checkout nmtx
