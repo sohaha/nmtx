@@ -140,28 +140,39 @@ jobs:
           for item in "${requested[@]}"; do
             case "$item" in
               windows)
-                expanded=("x86_64-pc-windows-msvc|windows-latest")
+                expanded=(
+                  "x86_64-pc-windows-msvc|windows-latest"
+                  "aarch64-pc-windows-msvc|windows-latest"
+                )
                 ;;
               mac)
                 expanded=("aarch64-apple-darwin|macos-latest" "x86_64-apple-darwin|macos-latest")
                 ;;
               linux)
                 expanded=(
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
                 ;;
               all)
                 expanded=(
                   "x86_64-pc-windows-msvc|windows-latest"
+                  "aarch64-pc-windows-msvc|windows-latest"
                   "aarch64-apple-darwin|macos-latest"
                   "x86_64-apple-darwin|macos-latest"
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
                 ;;
               x86_64-pc-windows-msvc)
                 expanded=("x86_64-pc-windows-msvc|windows-latest")
+                ;;
+              aarch64-pc-windows-msvc)
+                expanded=("aarch64-pc-windows-msvc|windows-latest")
                 ;;
               aarch64-apple-darwin)
                 expanded=("aarch64-apple-darwin|macos-latest")
@@ -169,8 +180,14 @@ jobs:
               x86_64-apple-darwin)
                 expanded=("x86_64-apple-darwin|macos-latest")
                 ;;
+              x86_64-unknown-linux-musl)
+                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
+                ;;
               x86_64-unknown-linux-gnu)
                 expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-musl)
+                expanded=("aarch64-unknown-linux-musl|ubuntu-24.04-arm")
                 ;;
               aarch64-unknown-linux-gnu)
                 expanded=("aarch64-unknown-linux-gnu|ubuntu-24.04-arm")
@@ -294,7 +311,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          python - <<'PY'
+          python3 - <<'PY'
           import os
           import pathlib
           import re
@@ -413,7 +430,29 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cargo build --target "${TARGET}" --release --timings \
+              --bin codex \
+              --bin codex-responses-api-proxy \
+              --bin codex-windows-sandbox-setup \
+              --bin codex-command-runner
+          else
+            cargo build --target "${TARGET}" --release --timings \
+              --bin codex \
+              --bin codex-responses-api-proxy
+          fi
+
+      - name: Smoke test Windows artifacts
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="target/${TARGET}/release"
+          "${release_dir}/codex.exe" --version
+          "${release_dir}/codex-responses-api-proxy.exe" --help >/dev/null
+          [[ -f "${release_dir}/codex-windows-sandbox-setup.exe" ]] || exit 1
+          [[ -f "${release_dir}/codex-command-runner.exe" ]] || exit 1
 
       - name: Smoke test macOS artifacts
         if: ${{ runner.os == 'macOS' }}
@@ -539,6 +578,10 @@ jobs:
           mkdir -p "$dest"
           cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
           cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/${TARGET}/release/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
+            cp "target/${TARGET}/release/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
+          fi
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cp "target/${TARGET}/release/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
@@ -616,103 +659,90 @@ jobs:
             fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
-      # - name: Verify source layout for release packaging
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     build_root="${GITHUB_WORKSPACE}/build-src"
-      #     [[ -f "${build_root}/package.json" ]] || exit 1
-      #     [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
-      #     [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
-      #     [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
+      - name: Verify source layout for release packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          [[ -f "${build_root}/package.json" ]] || exit 1
+          [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
+          [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
+          [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
 
-      # - name: Determine npm publish settings
-      #   id: npm_publish_settings
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     required_targets=(
-      #       "x86_64-pc-windows-msvc"
-      #       "aarch64-apple-darwin"
-      #       "x86_64-apple-darwin"
-      #       "x86_64-unknown-linux-gnu"
-      #       "aarch64-unknown-linux-gnu"
-      #       "x86_64-unknown-linux-musl"
-      #       "aarch64-unknown-linux-musl"
-      #     )
-      #     declare -A selected_targets=()
-      #     IFS=',' read -r -a requested_targets <<< "$TARGETS"
-      #     for target in "${requested_targets[@]}"; do
-      #       selected_targets["$target"]=1
-      #     done
-      #
-      #     has_full_release_matrix=true
-      #     if [[ "${#selected_targets[@]}" -ne "${#required_targets[@]}" ]]; then
-      #       has_full_release_matrix=false
-      #     else
-      #       for target in "${required_targets[@]}"; do
-      #         if [[ -z "${selected_targets[$target]:-}" ]]; then
-      #           has_full_release_matrix=false
-      #           break
-      #         fi
-      #       done
-      #     fi
-      #
-      #     version="$RELEASE_VERSION"
-      #     if [[ "$has_full_release_matrix" != "true" ]]; then
-      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
-      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
-      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
-      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
-      #     elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-      #       echo "should_publish=true" >> "$GITHUB_OUTPUT"
-      #       echo "npm_tag=alpha" >> "$GITHUB_OUTPUT"
-      #     else
-      #       echo "should_publish=false" >> "$GITHUB_OUTPUT"
-      #       echo "npm_tag=" >> "$GITHUB_OUTPUT"
-      #     fi
+      - name: Determine npm staging settings
+        id: npm_staging_settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_targets=(
+            "x86_64-pc-windows-msvc"
+            "aarch64-pc-windows-msvc"
+            "aarch64-apple-darwin"
+            "x86_64-apple-darwin"
+            "x86_64-unknown-linux-musl"
+            "aarch64-unknown-linux-musl"
+          )
+          declare -A selected_targets=()
+          IFS=',' read -r -a requested_targets <<< "$TARGETS"
+          for target in "${requested_targets[@]}"; do
+            selected_targets["$target"]=1
+          done
 
-      # - name: Setup pnpm
-      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-      #   uses: pnpm/action-setup@v4
-      #   with:
-      #     run_install: false
-      #
-      # - name: Setup Node.js for npm packaging
-      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-      #   uses: actions/setup-node@v6
-      #   with:
-      #     node-version: 22
-      #
-      # - name: Install dependencies for npm packaging
-      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     cd "${GITHUB_WORKSPACE}/build-src"
-      #     pnpm install --frozen-lockfile
-      #
-      # - name: Install DotSlash
-      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-      #   uses: facebook/install-dotslash@v2
-      #
-      # - name: Stage npm packages
-      #   if: ${{ steps.npm_publish_settings.outputs.should_publish == 'true' }}
-      #   shell: bash
-      #   env:
-      #     GH_TOKEN: ${{ github.token }}
-      #     WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      #   run: |
-      #     set -euo pipefail
-      #     cd "${GITHUB_WORKSPACE}/build-src"
-      #     ./scripts/stage_npm_packages.py \
-      #       --workflow-url "$WORKFLOW_URL" \
-      #       --release-version "$RELEASE_VERSION" \
-      #       --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
-      #       --package codex
+          has_full_install_matrix=true
+          for target in "${required_targets[@]}"; do
+            if [[ -z "${selected_targets[$target]:-}" ]]; then
+              has_full_install_matrix=false
+              break
+            fi
+          done
 
-      - name: Stage shared release assets
+          if [[ "$has_full_install_matrix" == "true" ]]; then
+            echo "should_stage=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_stage=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup pnpm
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js for npm packaging
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies for npm packaging
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          pnpm install --frozen-lockfile
+
+      - name: Install DotSlash
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
+        uses: facebook/install-dotslash@v2
+
+      - name: Stage npm packages
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          ./scripts/stage_npm_packages.py \
+            --workflow-url "$WORKFLOW_URL" \
+            --release-version "$RELEASE_VERSION" \
+            --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
+            --package codex
+
+      - name: Stage installer scripts
+        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
