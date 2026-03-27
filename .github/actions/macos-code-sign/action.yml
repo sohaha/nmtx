@@ -164,7 +164,11 @@ runs:
 
         release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
-        echo "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path"
+        if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path" 2>/dev/null; then
+          :
+        else
+          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$notary_key_path"
+        fi
         cleanup_notary() {
           rm -f "$notary_key_path"
         }
@@ -211,7 +215,11 @@ runs:
         release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
         dmg_path="${release_dir}/codex-${{ inputs.target }}.dmg"
-        echo "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path"
+        if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path" 2>/dev/null; then
+          :
+        else
+          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$notary_key_path"
+        fi
         cleanup_notary() {
           rm -f "$notary_key_path"
         }

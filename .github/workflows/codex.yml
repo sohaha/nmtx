@@ -430,14 +430,18 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          cargo_cmd=(cargo build)
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            cargo_cmd=(cargo zigbuild)
+          fi
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cargo build --target "${TARGET}" --release --timings \
+            "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
               --bin codex \
               --bin codex-responses-api-proxy \
               --bin codex-windows-sandbox-setup \
               --bin codex-command-runner
           else
-            cargo build --target "${TARGET}" --release --timings \
+            "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
               --bin codex \
               --bin codex-responses-api-proxy
           fi
@@ -488,15 +492,26 @@ jobs:
 
       - name: Smoke test Windows artifacts
         if: ${{ runner.os == 'Windows' }}
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          release_dir="target/${TARGET}/release"
-          "${release_dir}/codex.exe" --version
-          "${release_dir}/codex-responses-api-proxy.exe" --help >/dev/null
-          [[ -f "${release_dir}/codex-windows-sandbox-setup.exe" ]] || exit 1
-          [[ -f "${release_dir}/codex-command-runner.exe" ]] || exit 1
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-rs"
+          $releaseDir = Join-Path $buildRoot "target/$env:TARGET/release"
+
+          & (Join-Path $releaseDir "codex.exe") --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "codex.exe smoke test failed"
+          }
+
+          & (Join-Path $releaseDir "codex-responses-api-proxy.exe") --help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "codex-responses-api-proxy.exe smoke test failed"
+          }
+
+          foreach ($binary in @("codex-windows-sandbox-setup.exe", "codex-command-runner.exe")) {
+            if (-not (Test-Path (Join-Path $releaseDir $binary))) {
+              throw "missing Windows artifact: $binary"
+            }
+          }
 
       - name: Smoke test macOS artifacts
         if: ${{ runner.os == 'macOS' }}
