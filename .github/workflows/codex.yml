@@ -22,7 +22,7 @@ name: Build Codex Release
         required: false
         type: string
         default: all
-        description: Optional comma-separated targets. Supports windows, mac, linux, all.
+        description: Optional comma-separated targets. Supports windows, mac, linux, all. Linux currently builds GNU targets only.
       release_repo:
         required: true
         type: string
@@ -150,9 +150,7 @@ jobs:
                 ;;
               linux)
                 expanded=(
-                  "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
-                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
                 ;;
@@ -162,9 +160,7 @@ jobs:
                   "aarch64-pc-windows-msvc|windows-latest"
                   "aarch64-apple-darwin|macos-latest"
                   "x86_64-apple-darwin|macos-latest"
-                  "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
-                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
                 ;;
@@ -180,14 +176,8 @@ jobs:
               x86_64-apple-darwin)
                 expanded=("x86_64-apple-darwin|macos-latest")
                 ;;
-              x86_64-unknown-linux-musl)
-                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
-                ;;
               x86_64-unknown-linux-gnu)
                 expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
-                ;;
-              aarch64-unknown-linux-musl)
-                expanded=("aarch64-unknown-linux-musl|ubuntu-24.04-arm")
                 ;;
               aarch64-unknown-linux-gnu)
                 expanded=("aarch64-unknown-linux-gnu|ubuntu-24.04-arm")
@@ -771,8 +761,10 @@ jobs:
 
           if [[ "$has_full_install_matrix" == "true" ]]; then
             echo "should_stage=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Installer staging::full installer target matrix available"
           else
             echo "should_stage=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Installer staging skipped::musl installer targets are unavailable for the current source build; skipping npm/install staging"
           fi
 
       - name: Setup pnpm
