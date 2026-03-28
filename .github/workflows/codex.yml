@@ -146,7 +146,7 @@ jobs:
                 )
                 ;;
               mac)
-                expanded=("aarch64-apple-darwin|macos-latest" "x86_64-apple-darwin|macos-latest")
+                expanded=("aarch64-apple-darwin|macos-15" "x86_64-apple-darwin|macos-15-intel")
                 ;;
               linux)
                 expanded=(
@@ -158,8 +158,8 @@ jobs:
                 expanded=(
                   "x86_64-pc-windows-msvc|windows-latest"
                   "aarch64-pc-windows-msvc|windows-latest"
-                  "aarch64-apple-darwin|macos-latest"
-                  "x86_64-apple-darwin|macos-latest"
+                  "aarch64-apple-darwin|macos-15"
+                  "x86_64-apple-darwin|macos-15-intel"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
@@ -171,10 +171,10 @@ jobs:
                 expanded=("aarch64-pc-windows-msvc|windows-latest")
                 ;;
               aarch64-apple-darwin)
-                expanded=("aarch64-apple-darwin|macos-latest")
+                expanded=("aarch64-apple-darwin|macos-15")
                 ;;
               x86_64-apple-darwin)
-                expanded=("x86_64-apple-darwin|macos-latest")
+                expanded=("x86_64-apple-darwin|macos-15-intel")
                 ;;
               x86_64-unknown-linux-gnu)
                 expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
@@ -262,7 +262,7 @@ jobs:
 
     steps:
       - name: Checkout nmtx
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Fetch source at exact SHA
         shell: bash
@@ -344,6 +344,12 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
+      - name: Setup MSVC toolchain
+        if: ${{ runner.os == 'Windows' }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ env.TARGET == 'aarch64-pc-windows-msvc' && 'amd64_arm64' || 'amd64' }}
+
       - name: Use hermetic Cargo home
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -422,7 +428,8 @@ jobs:
           echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
           echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
 
-      - name: Cargo build
+      - name: Cargo build (Unix)
+        if: ${{ runner.os != 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -431,17 +438,22 @@ jobs:
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
             cargo_cmd=(cargo zigbuild)
           fi
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
-              --bin codex \
-              --bin codex-responses-api-proxy \
-              --bin codex-windows-sandbox-setup \
-              --bin codex-command-runner
-          else
-            "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
-              --bin codex \
-              --bin codex-responses-api-proxy
-          fi
+          "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
+            --bin codex \
+            --bin codex-responses-api-proxy
+
+      - name: Cargo build (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location "$env:GITHUB_WORKSPACE/build-src/codex-rs"
+
+          cargo build --target $env:TARGET --release --timings `
+            --bin codex `
+            --bin codex-responses-api-proxy `
+            --bin codex-windows-sandbox-setup `
+            --bin codex-command-runner
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
         if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
