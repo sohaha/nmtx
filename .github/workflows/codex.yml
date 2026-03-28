@@ -350,6 +350,24 @@ jobs:
         with:
           arch: ${{ env.TARGET == 'aarch64-pc-windows-msvc' && 'amd64_arm64' || 'amd64' }}
 
+      - name: Disable Unix rustc wrapper on Windows
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $configPath = Join-Path $env:GITHUB_WORKSPACE 'build-src/codex-rs/.cargo/config.toml'
+          if (-not (Test-Path $configPath)) {
+            throw "missing Cargo config: $configPath"
+          }
+
+          $content = Get-Content -Raw -Path $configPath
+          $updated = $content -replace '(?m)^rustc-wrapper = "scripts/rustc-wrapper\.sh"\r?\n?', ''
+          if ($updated -eq $content) {
+            throw "failed to remove Unix rustc-wrapper from $configPath"
+          }
+
+          Set-Content -Path $configPath -Value $updated -Encoding utf8NoBOM
+
       - name: Use hermetic Cargo home
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
