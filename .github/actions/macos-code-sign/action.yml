@@ -182,13 +182,18 @@ runs:
             echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 without base64 decoding"
           fi
 
-          tr -d '\r' < "$output_path" > "${output_path}.normalized"
-          mv "${output_path}.normalized" "$output_path"
-
           if openssl pkey -in "$output_path" -inform PEM -noout >/dev/null 2>&1; then
             echo "::notice title=Notary key::validated notary key as PEM"
             return 0
           fi
+
+          LC_ALL=C tr -d '\r' < "$output_path" > "${output_path}.normalized"
+          if openssl pkey -in "${output_path}.normalized" -inform PEM -noout >/dev/null 2>&1; then
+            mv "${output_path}.normalized" "$output_path"
+            echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+            return 0
+          fi
+          rm -f "${output_path}.normalized"
 
           if openssl pkey -in "$output_path" -inform DER -noout >/dev/null 2>&1; then
             openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$output_path" -out "${output_path}.pem" >/dev/null 2>&1
@@ -263,13 +268,18 @@ runs:
             echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 without base64 decoding"
           fi
 
-          tr -d '\r' < "$output_path" > "${output_path}.normalized"
-          mv "${output_path}.normalized" "$output_path"
-
           if openssl pkey -in "$output_path" -inform PEM -noout >/dev/null 2>&1; then
             echo "::notice title=Notary key::validated notary key as PEM"
             return 0
           fi
+
+          LC_ALL=C tr -d '\r' < "$output_path" > "${output_path}.normalized"
+          if openssl pkey -in "${output_path}.normalized" -inform PEM -noout >/dev/null 2>&1; then
+            mv "${output_path}.normalized" "$output_path"
+            echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+            return 0
+          fi
+          rm -f "${output_path}.normalized"
 
           if openssl pkey -in "$output_path" -inform DER -noout >/dev/null 2>&1; then
             openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$output_path" -out "${output_path}.pem" >/dev/null 2>&1
