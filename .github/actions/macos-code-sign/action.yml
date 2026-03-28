@@ -43,6 +43,17 @@ runs:
       run: |
         set -euo pipefail
 
+        decode_base64() {
+          local output_path="$1"
+          if printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_CERTIFICATE" | base64 -d > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$output_path"
+        }
+
         if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
           echo "APPLE_CERTIFICATE is required for macOS signing"
           exit 1
@@ -54,7 +65,7 @@ runs:
         fi
 
         cert_path="${RUNNER_TEMP}/apple_signing_certificate.p12"
-        echo "$APPLE_CERTIFICATE" | base64 -d > "$cert_path"
+        decode_base64 "$cert_path"
 
         keychain_path="${RUNNER_TEMP}/codex-signing.keychain-db"
         security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
@@ -155,6 +166,20 @@ runs:
       run: |
         set -euo pipefail
 
+        decode_base64() {
+          local output_path="$1"
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 --decode > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -D > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
+        }
+
         for var in APPLE_NOTARIZATION_KEY_P8 APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID; do
           if [[ -z "${!var:-}" ]]; then
             echo "$var is required for notarization"
@@ -164,11 +189,7 @@ runs:
 
         release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
-        if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path" 2>/dev/null; then
-          :
-        else
-          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$notary_key_path"
-        fi
+        decode_base64 "$notary_key_path"
         cleanup_notary() {
           rm -f "$notary_key_path"
         }
@@ -205,6 +226,20 @@ runs:
       run: |
         set -euo pipefail
 
+        decode_base64() {
+          local output_path="$1"
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 --decode > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -D > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
+        }
+
         for var in APPLE_CODESIGN_IDENTITY APPLE_NOTARIZATION_KEY_P8 APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID; do
           if [[ -z "${!var:-}" ]]; then
             echo "$var is required"
@@ -215,11 +250,7 @@ runs:
         release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
         dmg_path="${release_dir}/codex-${{ inputs.target }}.dmg"
-        if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$notary_key_path" 2>/dev/null; then
-          :
-        else
-          printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$notary_key_path"
-        fi
+        decode_base64 "$notary_key_path"
         cleanup_notary() {
           rm -f "$notary_key_path"
         }

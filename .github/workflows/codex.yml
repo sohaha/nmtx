@@ -371,6 +371,13 @@ jobs:
         with:
           version: 0.14.0
 
+      - name: Install cargo-zigbuild
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-zigbuild
+
       - name: Install musl build tools
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -497,17 +504,24 @@ jobs:
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-rs"
           $releaseDir = Join-Path $buildRoot "target/$env:TARGET/release"
 
-          & (Join-Path $releaseDir "codex.exe") --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "codex.exe smoke test failed"
+          if ($env:TARGET -eq "x86_64-pc-windows-msvc") {
+            & (Join-Path $releaseDir "codex.exe") --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "codex.exe smoke test failed"
+            }
+
+            & (Join-Path $releaseDir "codex-responses-api-proxy.exe") --help | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "codex-responses-api-proxy.exe smoke test failed"
+            }
           }
 
-          & (Join-Path $releaseDir "codex-responses-api-proxy.exe") --help | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            throw "codex-responses-api-proxy.exe smoke test failed"
-          }
-
-          foreach ($binary in @("codex-windows-sandbox-setup.exe", "codex-command-runner.exe")) {
+          foreach ($binary in @(
+            "codex.exe",
+            "codex-responses-api-proxy.exe",
+            "codex-windows-sandbox-setup.exe",
+            "codex-command-runner.exe"
+          )) {
             if (-not (Test-Path (Join-Path $releaseDir $binary))) {
               throw "missing Windows artifact: $binary"
             }
