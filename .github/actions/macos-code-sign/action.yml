@@ -168,38 +168,135 @@ runs:
 
         write_notary_key() {
           local output_path="$1"
-          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 --decode > "$output_path" 2>/dev/null; then
+          local raw_secret unquoted_secret
+
+          strip_wrapping_quotes() {
+            local value="$1"
+            local first_char last_char
+            if ((${#value} >= 2)); then
+              first_char="${value:0:1}"
+              last_char="${value: -1}"
+              if [[ ("$first_char" == '"' || "$first_char" == "'") && "$first_char" == "$last_char" ]]; then
+                printf '%s' "${value:1:${#value}-2}"
+                return 0
+              fi
+            fi
+            printf '%s' "$value"
+          }
+
+          decode_base64_value() {
+            local value="$1"
+            local target_path="$2"
+            if printf '%s' "$value" | base64 --decode > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            if printf '%s' "$value" | base64 -d > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$value" | base64 -D > "$target_path" 2>/dev/null
+          }
+
+          validate_key_path() {
+            local candidate_path="$1"
+            local normalized_path="${candidate_path}.normalized"
+            local pem_path="${candidate_path}.pem"
+
+            if openssl pkey -in "$candidate_path" -inform PEM -noout >/dev/null 2>&1; then
+              echo "::notice title=Notary key::validated notary key as PEM"
+              return 0
+            fi
+
+            LC_ALL=C tr -d '\r' < "$candidate_path" > "$normalized_path"
+            if openssl pkey -in "$normalized_path" -inform PEM -noout >/dev/null 2>&1; then
+              mv "$normalized_path" "$candidate_path"
+              echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+              return 0
+            fi
+            rm -f "$normalized_path"
+
+            if openssl pkey -in "$candidate_path" -inform DER -noout >/dev/null 2>&1; then
+              openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$candidate_path" -out "$pem_path" >/dev/null 2>&1
+              mv "$pem_path" "$candidate_path"
+              echo "::notice title=Notary key::converted DER notary key to PEM"
+              return 0
+            fi
+
+            rm -f "$pem_path"
+            return 1
+          }
+
+          write_text_candidate() {
+            local value="$1"
+            local target_path="$2"
+            local label="$3"
+            local normalized_value
+
+            normalized_value="$(strip_wrapping_quotes "$value")"
+            normalized_value="${normalized_value//\\r\\n/$'\n'}"
+            normalized_value="${normalized_value//\\n/$'\n'}"
+            normalized_value="${normalized_value//\\r/$'\r'}"
+
+            printf '%s\n' "$normalized_value" > "$target_path"
+            echo "::notice title=Notary key::$label"
+          }
+
+          decoded_printable_text() {
+            local candidate_path="$1"
+            LC_ALL=C grep -q '[^[:print:][:space:]]' "$candidate_path" && return 1
+            return 0
+          }
+
+          try_decoded_text_variants() {
+            local candidate_path="$1"
+            local target_path="$2"
+            local decoded_text compact_text
+
+            decoded_printable_text "$candidate_path" || return 1
+            decoded_text="$(cat "$candidate_path")"
+
+            write_text_candidate "$decoded_text" "$target_path" "normalized decoded notary key text"
+            if validate_key_path "$target_path"; then
+              return 0
+            fi
+
+            compact_text="$(printf '%s' "$decoded_text" | tr -d '[:space:]')"
+            if [[ "$compact_text" =~ ^[A-Za-z0-9+/=]+$ ]] && decode_base64_value "$compact_text" "$target_path"; then
+              echo "::notice title=Notary key::decoded nested base64 notary key payload"
+              if validate_key_path "$target_path"; then
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          raw_secret="$APPLE_NOTARIZATION_KEY_P8"
+          unquoted_secret="$(strip_wrapping_quotes "$raw_secret")"
+
+          if decode_base64_value "$raw_secret" "$output_path"; then
             echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$output_path" 2>/dev/null; then
-            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -D > "$output_path" 2>/dev/null; then
-            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif [[ "$APPLE_NOTARIZATION_KEY_P8" == *\\n* ]]; then
-            printf '%b' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
-            echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 with escaped newlines expanded"
-          else
-            printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
-            echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 without base64 decoding"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
           fi
 
-          if openssl pkey -in "$output_path" -inform PEM -noout >/dev/null 2>&1; then
-            echo "::notice title=Notary key::validated notary key as PEM"
+          if [[ "$unquoted_secret" != "$raw_secret" ]] && decode_base64_value "$unquoted_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded quoted APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          write_text_candidate "$raw_secret" "$output_path" "wrote raw APPLE_NOTARIZATION_KEY_P8"
+          if validate_key_path "$output_path"; then
             return 0
           fi
 
-          LC_ALL=C tr -d '\r' < "$output_path" > "${output_path}.normalized"
-          if openssl pkey -in "${output_path}.normalized" -inform PEM -noout >/dev/null 2>&1; then
-            mv "${output_path}.normalized" "$output_path"
-            echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
-            return 0
-          fi
-          rm -f "${output_path}.normalized"
-
-          if openssl pkey -in "$output_path" -inform DER -noout >/dev/null 2>&1; then
-            openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$output_path" -out "${output_path}.pem" >/dev/null 2>&1
-            mv "${output_path}.pem" "$output_path"
-            echo "::notice title=Notary key::converted DER notary key to PEM"
-            return 0
+          if [[ "$unquoted_secret" != "$raw_secret" ]]; then
+            write_text_candidate "$unquoted_secret" "$output_path" "wrote unquoted APPLE_NOTARIZATION_KEY_P8"
+            if validate_key_path "$output_path"; then
+              return 0
+            fi
           fi
 
           echo "APPLE_NOTARIZATION_KEY_P8 did not decode to a valid PEM or DER private key"
@@ -254,38 +351,135 @@ runs:
 
         write_notary_key() {
           local output_path="$1"
-          if printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 --decode > "$output_path" 2>/dev/null; then
+          local raw_secret unquoted_secret
+
+          strip_wrapping_quotes() {
+            local value="$1"
+            local first_char last_char
+            if ((${#value} >= 2)); then
+              first_char="${value:0:1}"
+              last_char="${value: -1}"
+              if [[ ("$first_char" == '"' || "$first_char" == "'") && "$first_char" == "$last_char" ]]; then
+                printf '%s' "${value:1:${#value}-2}"
+                return 0
+              fi
+            fi
+            printf '%s' "$value"
+          }
+
+          decode_base64_value() {
+            local value="$1"
+            local target_path="$2"
+            if printf '%s' "$value" | base64 --decode > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            if printf '%s' "$value" | base64 -d > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$value" | base64 -D > "$target_path" 2>/dev/null
+          }
+
+          validate_key_path() {
+            local candidate_path="$1"
+            local normalized_path="${candidate_path}.normalized"
+            local pem_path="${candidate_path}.pem"
+
+            if openssl pkey -in "$candidate_path" -inform PEM -noout >/dev/null 2>&1; then
+              echo "::notice title=Notary key::validated notary key as PEM"
+              return 0
+            fi
+
+            LC_ALL=C tr -d '\r' < "$candidate_path" > "$normalized_path"
+            if openssl pkey -in "$normalized_path" -inform PEM -noout >/dev/null 2>&1; then
+              mv "$normalized_path" "$candidate_path"
+              echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+              return 0
+            fi
+            rm -f "$normalized_path"
+
+            if openssl pkey -in "$candidate_path" -inform DER -noout >/dev/null 2>&1; then
+              openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$candidate_path" -out "$pem_path" >/dev/null 2>&1
+              mv "$pem_path" "$candidate_path"
+              echo "::notice title=Notary key::converted DER notary key to PEM"
+              return 0
+            fi
+
+            rm -f "$pem_path"
+            return 1
+          }
+
+          write_text_candidate() {
+            local value="$1"
+            local target_path="$2"
+            local label="$3"
+            local normalized_value
+
+            normalized_value="$(strip_wrapping_quotes "$value")"
+            normalized_value="${normalized_value//\\r\\n/$'\n'}"
+            normalized_value="${normalized_value//\\n/$'\n'}"
+            normalized_value="${normalized_value//\\r/$'\r'}"
+
+            printf '%s\n' "$normalized_value" > "$target_path"
+            echo "::notice title=Notary key::$label"
+          }
+
+          decoded_printable_text() {
+            local candidate_path="$1"
+            LC_ALL=C grep -q '[^[:print:][:space:]]' "$candidate_path" && return 1
+            return 0
+          }
+
+          try_decoded_text_variants() {
+            local candidate_path="$1"
+            local target_path="$2"
+            local decoded_text compact_text
+
+            decoded_printable_text "$candidate_path" || return 1
+            decoded_text="$(cat "$candidate_path")"
+
+            write_text_candidate "$decoded_text" "$target_path" "normalized decoded notary key text"
+            if validate_key_path "$target_path"; then
+              return 0
+            fi
+
+            compact_text="$(printf '%s' "$decoded_text" | tr -d '[:space:]')"
+            if [[ "$compact_text" =~ ^[A-Za-z0-9+/=]+$ ]] && decode_base64_value "$compact_text" "$target_path"; then
+              echo "::notice title=Notary key::decoded nested base64 notary key payload"
+              if validate_key_path "$target_path"; then
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          raw_secret="$APPLE_NOTARIZATION_KEY_P8"
+          unquoted_secret="$(strip_wrapping_quotes "$raw_secret")"
+
+          if decode_base64_value "$raw_secret" "$output_path"; then
             echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -d > "$output_path" 2>/dev/null; then
-            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif printf '%s' "$APPLE_NOTARIZATION_KEY_P8" | base64 -D > "$output_path" 2>/dev/null; then
-            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
-          elif [[ "$APPLE_NOTARIZATION_KEY_P8" == *\\n* ]]; then
-            printf '%b' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
-            echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 with escaped newlines expanded"
-          else
-            printf '%s\n' "$APPLE_NOTARIZATION_KEY_P8" > "$output_path"
-            echo "::notice title=Notary key::wrote raw APPLE_NOTARIZATION_KEY_P8 without base64 decoding"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
           fi
 
-          if openssl pkey -in "$output_path" -inform PEM -noout >/dev/null 2>&1; then
-            echo "::notice title=Notary key::validated notary key as PEM"
+          if [[ "$unquoted_secret" != "$raw_secret" ]] && decode_base64_value "$unquoted_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded quoted APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          write_text_candidate "$raw_secret" "$output_path" "wrote raw APPLE_NOTARIZATION_KEY_P8"
+          if validate_key_path "$output_path"; then
             return 0
           fi
 
-          LC_ALL=C tr -d '\r' < "$output_path" > "${output_path}.normalized"
-          if openssl pkey -in "${output_path}.normalized" -inform PEM -noout >/dev/null 2>&1; then
-            mv "${output_path}.normalized" "$output_path"
-            echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
-            return 0
-          fi
-          rm -f "${output_path}.normalized"
-
-          if openssl pkey -in "$output_path" -inform DER -noout >/dev/null 2>&1; then
-            openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$output_path" -out "${output_path}.pem" >/dev/null 2>&1
-            mv "${output_path}.pem" "$output_path"
-            echo "::notice title=Notary key::converted DER notary key to PEM"
-            return 0
+          if [[ "$unquoted_secret" != "$raw_secret" ]]; then
+            write_text_candidate "$unquoted_secret" "$output_path" "wrote unquoted APPLE_NOTARIZATION_KEY_P8"
+            if validate_key_path "$output_path"; then
+              return 0
+            fi
           fi
 
           echo "APPLE_NOTARIZATION_KEY_P8 did not decode to a valid PEM or DER private key"
