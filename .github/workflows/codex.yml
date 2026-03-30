@@ -484,7 +484,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(python3 "${GITHUB_WORKSPACE}/build-src/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
+          version="$(
+            awk '
+              $0 == "[[package]]" {
+                if (in_pkg && name == "v8" && version != "") {
+                  seen[version] = 1
+                }
+                in_pkg = 1
+                name = ""
+                version = ""
+                next
+              }
+              in_pkg && /^name = "v8"$/ {
+                name = "v8"
+                next
+              }
+              in_pkg && /^version = "/ {
+                version = $0
+                sub(/^version = "/, "", version)
+                sub(/"$/, "", version)
+                next
+              }
+              END {
+                if (in_pkg && name == "v8" && version != "") {
+                  seen[version] = 1
+                }
+                count = 0
+                for (candidate in seen) {
+                  resolved = candidate
+                  count++
+                }
+                if (count != 1) {
+                  exit 2
+                }
+                print resolved
+              }
+            ' "${GITHUB_WORKSPACE}/build-src/codex-rs/Cargo.lock"
+          )"
           release_tag="rusty-v8-v${version}"
           base_url="https://github.com/openai/codex/releases/download/${release_tag}"
           archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
