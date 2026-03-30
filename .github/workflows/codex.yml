@@ -22,7 +22,7 @@ name: Build Codex Release
         required: false
         type: string
         default: all
-        description: Optional comma-separated targets. Supports windows, mac, linux, all. Linux currently builds GNU targets only.
+        description: Optional comma-separated targets. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
       release_repo:
         required: true
         type: string
@@ -150,8 +150,22 @@ jobs:
                 ;;
               linux)
                 expanded=(
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                )
+                ;;
+              linux-gnu)
+                expanded=(
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                )
+                ;;
+              linux-musl)
+                expanded=(
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                 )
                 ;;
               all)
@@ -160,6 +174,8 @@ jobs:
                   "aarch64-pc-windows-msvc|windows-latest"
                   "aarch64-apple-darwin|macos-15"
                   "x86_64-apple-darwin|macos-15"
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
                   "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
                 )
@@ -181,6 +197,12 @@ jobs:
                 ;;
               aarch64-unknown-linux-gnu)
                 expanded=("aarch64-unknown-linux-gnu|ubuntu-24.04-arm")
+                ;;
+              x86_64-unknown-linux-musl)
+                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-musl)
+                expanded=("aarch64-unknown-linux-musl|ubuntu-24.04-arm")
                 ;;
               *)
                 echo "invalid target: $item"
