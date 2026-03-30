@@ -418,13 +418,6 @@ jobs:
         with:
           version: 0.14.0
 
-      - name: Install cargo-zigbuild
-        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install --locked cargo-zigbuild
-
       - name: Install musl build tools
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -537,11 +530,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo_cmd=(cargo build)
-          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
-            cargo_cmd=(cargo zigbuild)
-          fi
-          "${cargo_cmd[@]}" --target "${TARGET}" --release --timings \
+          cargo build --target "${TARGET}" --release --timings \
             --bin codex \
             --bin codex-responses-api-proxy
 
