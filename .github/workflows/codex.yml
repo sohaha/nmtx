@@ -343,10 +343,10 @@ jobs:
           if count != 1:
               raise SystemExit("failed to update workspace version in Cargo.toml")
 
-          if 'features = ["hf-hub-native-tls", "ort-load-dynamic"]' not in updated:
+          if 'ort-load-dynamic' not in updated:
               updated, count = re.subn(
                   r'(?m)^fastembed = "([^"]+)"$',
-                  r'fastembed = { version = "\1", default-features = false, features = ["hf-hub-native-tls", "ort-load-dynamic"] }',
+                  r'fastembed = { version = "\1", default-features = false, features = ["hf-hub-native-tls", "image-models", "ort-load-dynamic"] }',
                   updated,
                   count=1,
               )
