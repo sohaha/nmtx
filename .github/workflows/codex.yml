@@ -509,6 +509,18 @@ jobs:
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"
 
+      - name: Use Zig linker for musl targets
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${CC:-}" ]]; then
+            echo "missing CC env for musl linker override" >&2
+            exit 1
+          fi
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${CC}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${CC}" >> "$GITHUB_ENV"
+
       - name: Configure rustc UBSan wrapper
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
