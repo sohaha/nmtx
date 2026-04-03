@@ -356,6 +356,92 @@ jobs:
           cargo_toml.write_text(updated, encoding="utf-8")
           PY
 
+      - name: Patch duplicate show_buddy config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "config" / "src"
+          if not root.exists():
+            raise SystemExit(f"missing config src dir: {root}")
+
+          def fix_file(path: pathlib.Path) -> bool:
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines(keepends=True)
+            changed = False
+
+            out = []
+            in_tui_struct = False
+            show_buddy_seen = False
+            for line in lines:
+              if not in_tui_struct and re.search(r'\bstruct\s+Tui\s*\{', line):
+                in_tui_struct = True
+                show_buddy_seen = False
+                out.append(line)
+                continue
+              if in_tui_struct and re.search(r'^\s*}\s*$', line):
+                in_tui_struct = False
+                show_buddy_seen = False
+                out.append(line)
+                continue
+              if in_tui_struct and re.search(r'\bshow_buddy\s*:', line):
+                if show_buddy_seen:
+                  while out and re.match(r'^\s*(///|#\[|\s*$)', out[-1]):
+                    out.pop()
+                  changed = True
+                  continue
+                show_buddy_seen = True
+                out.append(line)
+                continue
+              out.append(line)
+
+            final = []
+            in_tui_literal = False
+            brace_depth = 0
+            show_buddy_seen_lit = False
+            for line in out:
+              stripped = line.lstrip()
+              if (not in_tui_literal and "Tui {" in line and "struct" not in line
+                  and not stripped.startswith("//")):
+                in_tui_literal = True
+                show_buddy_seen_lit = False
+                brace_depth = line.count("{") - line.count("}")
+                final.append(line)
+                continue
+              if in_tui_literal:
+                if re.search(r'\bshow_buddy\s*:', line):
+                  if show_buddy_seen_lit:
+                    changed = True
+                  else:
+                    show_buddy_seen_lit = True
+                    final.append(line)
+                else:
+                  final.append(line)
+                brace_depth += line.count("{") - line.count("}")
+                if brace_depth <= 0:
+                  in_tui_literal = False
+                continue
+              final.append(line)
+
+            if changed:
+              path.write_text("".join(final), encoding="utf-8")
+            return changed
+
+          any_changed = False
+          for path in root.rglob("*.rs"):
+            if fix_file(path):
+              any_changed = True
+
+          if any_changed:
+            print("patched duplicate show_buddy entries")
+          else:
+            print("no duplicate show_buddy entries found")
+          PY
+
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
