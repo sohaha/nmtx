@@ -590,7 +590,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          common_rustflags="-C link-arg=-lm -C link-self-contained=no"
+          # Keep the musl linker configuration explicit, and add a best-effort
+          # hint to reduce linker peak memory on constrained runners.
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
           target_no_jitter="${target_no_jitter//-/_}"
@@ -674,7 +676,7 @@ jobs:
           set -euo pipefail
           # The ubuntu-24.04-arm hosted runner is relatively constrained; rustc
           # parallelism can OOM/kill the runner and surface as "lost communication".
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
 
       - name: Cargo build (Unix)
@@ -683,7 +685,13 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo build --target "${TARGET}" --release --timings \
+          timings=(--timings)
+          if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
+            # Timings add extra I/O on a slow/constrained runner; not worth it
+            # for the flakiest target.
+            timings=()
+          fi
+          cargo build --target "${TARGET}" --release "${timings[@]}" \
             --bin codex \
             --bin codex-responses-api-proxy
 
