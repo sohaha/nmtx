@@ -679,6 +679,23 @@ jobs:
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
 
+      - name: Enable swap on aarch64 musl runner
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # If the runner OOM-kills the build, GitHub often reports it as
+          # "lost communication". Adding swap trades speed for stability.
+          size_gb="6"
+          if [[ ! -f /swapfile ]]; then
+            sudo fallocate -l "${size_gb}G" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$((size_gb * 1024))"
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+          fi
+          sudo swapon /swapfile || true
+          free -h || true
+          swapon --show || true
+
       - name: Cargo build (Unix)
         if: ${{ runner.os != 'Windows' }}
         shell: bash
