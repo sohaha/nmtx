@@ -47,27 +47,45 @@ jobs:
       - name: Resolve payload
         id: payload
         shell: bash
+        env:
+          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
         run: |
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
-            echo "source_ref=${{ github.event.client_payload.source_ref || 'web' }}" >> "$GITHUB_OUTPUT"
-            echo "release_tag=${{ github.event.client_payload.release_tag }}" >> "$GITHUB_OUTPUT"
-            echo "targets_input=${{ github.event.client_payload.targets || 'all' }}" >> "$GITHUB_OUTPUT"
-            echo "release_repo=${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}" >> "$GITHUB_OUTPUT"
+            version="${{ github.event.client_payload.version }}"
+            source_ref="${{ github.event.client_payload.source_ref || 'web' }}"
+            release_tag="${{ github.event.client_payload.release_tag }}"
+            targets_input="${{ github.event.client_payload.targets || 'all' }}"
+            release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
           else
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
-            echo "release_tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
-            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
-            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+            version="${{ inputs.version }}"
+            source_ref="${{ inputs.source_ref }}"
+            release_tag="${{ inputs.release_tag }}"
+            targets_input="${{ inputs.targets }}"
+            release_repo="${{ inputs.release_repo }}"
           fi
-          echo "source_url=https://cnb.cool/zls_nmtx/sohaha/zcodex" >> "$GITHUB_OUTPUT"
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "targets_input=${targets_input}" >> "$GITHUB_OUTPUT"
+          echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${CNB_PASSWORD:-}" ]]; then
+            source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
+          else
+            source_url="https://github.com/${release_repo}"
+          fi
+          echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${{ steps.payload.outputs.source_url }}" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" ]] || exit 1
+          source_url="${{ steps.payload.outputs.source_url }}"
+          release_repo="${{ steps.payload.outputs.release_repo }}"
+          if [[ "$source_url" != "https://cnb.cool/zls_nmtx/sohaha/zcodex" && "$source_url" != "https://github.com/${release_repo}" ]]; then
+            exit 1
+          fi
           [[ "${{ steps.payload.outputs.source_ref }}" == "web" ]] || exit 1
           [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zcodex" ]] || exit 1
           [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
@@ -89,20 +107,32 @@ jobs:
         shell: bash
         env:
           CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           SOURCE_URL: ${{ steps.payload.outputs.source_url }}
           SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
         run: |
           set -euo pipefail
-          [[ -n "$CNB_PASSWORD" ]] || {
-            echo "missing CNB_PASSWORD secret"
-            exit 1
-          }
-          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "$CNB_PASSWORD" ]] || {
+              echo "missing CNB_PASSWORD secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
           source_sha="$(
             git \
               -c credential.helper= \
               -c core.askPass= \
-              -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+              "${auth_args[@]}" \
               ls-remote "$SOURCE_URL" "refs/heads/$SOURCE_REF" \
               | awk '{print $1}'
           )"
@@ -290,21 +320,33 @@ jobs:
         shell: bash
         env:
           CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ -n "$CNB_PASSWORD" ]] || {
-            echo "missing CNB_PASSWORD secret"
-            exit 1
-          }
           build_root="${GITHUB_WORKSPACE}/build-src"
-          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "$CNB_PASSWORD" ]] || {
+              echo "missing CNB_PASSWORD secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
           rm -rf "$build_root"
           git init "$build_root"
           git \
             -C "$build_root" \
             -c credential.helper= \
             -c core.askPass= \
-            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            "${auth_args[@]}" \
             fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
@@ -908,21 +950,33 @@ jobs:
         shell: bash
         env:
           CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ -n "$CNB_PASSWORD" ]] || {
-            echo "missing CNB_PASSWORD secret"
-            exit 1
-          }
           build_root="${GITHUB_WORKSPACE}/build-src"
-          basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "$CNB_PASSWORD" ]] || {
+              echo "missing CNB_PASSWORD secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
           rm -rf "$build_root"
           git init "$build_root"
           git \
             -C "$build_root" \
             -c credential.helper= \
             -c core.askPass= \
-            -c http.extraHeader="AUTHORIZATION: basic ${basic_auth_token}" \
+            "${auth_args[@]}" \
             fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
