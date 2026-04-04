@@ -667,6 +667,16 @@ jobs:
           echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
+      - name: Reduce Rust build parallelism on aarch64 musl
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The ubuntu-24.04-arm hosted runner is relatively constrained; rustc
+          # parallelism can OOM/kill the runner and surface as "lost communication".
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+
       - name: Cargo build (Unix)
         if: ${{ runner.os != 'Windows' }}
         shell: bash
