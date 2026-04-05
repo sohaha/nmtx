@@ -516,7 +516,7 @@ runs:
 
         codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "${keychain_args[@]}" "$dmg_path"
         notarize_submission "codex-${{ inputs.target }}.dmg" "$dmg_path" "$notary_key_path"
-        xcrun stapler staple "$dmg_path"
+        retry_notary_command "staple codex-${{ inputs.target }}.dmg" xcrun stapler staple "$dmg_path"
 
     - name: Remove signing keychain
       if: ${{ always() }}

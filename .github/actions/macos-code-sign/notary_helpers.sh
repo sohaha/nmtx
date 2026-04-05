@@ -1,3 +1,33 @@
+retry_notary_command() {
+  local label="$1"
+  shift
+
+  local attempt=1
+  local max_attempts=3
+  local sleep_seconds=15
+  local output
+  local exit_code
+
+  while true; do
+    if output=$("$@" 2>&1); then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    exit_code=$?
+    printf '%s\n' "$output" >&2
+
+    if (( attempt >= max_attempts )); then
+      return "$exit_code"
+    fi
+
+    echo "::warning title=Notary retry::${label} attempt ${attempt}/${max_attempts} failed, retrying in ${sleep_seconds}s"
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+    sleep_seconds=$((sleep_seconds * 2))
+  done
+}
+
 notarize_submission() {
   local label="$1"
   local path="$2"
@@ -19,12 +49,13 @@ notarize_submission() {
   fi
 
   local submission_json
-  submission_json=$(xcrun notarytool submit "$path" \
-    --key "$notary_key_path" \
-    --key-id "$APPLE_NOTARIZATION_KEY_ID" \
-    --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
-    --output-format json \
-    --wait)
+  submission_json=$(retry_notary_command "$label notarization" \
+    xcrun notarytool submit "$path" \
+      --key "$notary_key_path" \
+      --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+      --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+      --output-format json \
+      --wait)
 
   local status submission_id
   status=$(printf '%s\n' "$submission_json" | jq -r '.status // "Unknown"')
