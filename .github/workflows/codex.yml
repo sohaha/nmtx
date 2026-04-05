@@ -31,6 +31,11 @@ name: Build Codex Release
 permissions:
   contents: read
 
+env:
+  # Opt into Node.js 24 for JavaScript-based actions ahead of the runner default
+  # flip in 2026 to avoid surprise breakages.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   resolve:
     runs-on: ubuntu-latest
@@ -669,8 +674,8 @@ jobs:
           echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
-      - name: Reduce Rust build parallelism on aarch64 musl
-        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' }}
+      - name: Reduce Rust build parallelism on aarch64 Linux
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -679,8 +684,8 @@ jobs:
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
 
-      - name: Enable swap on aarch64 musl runner
-        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' }}
+      - name: Enable swap on aarch64 Linux runner
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -703,7 +708,7 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           timings=(--timings)
-          if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
+          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
             # for the flakiest target.
             timings=()
