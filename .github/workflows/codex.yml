@@ -690,6 +690,9 @@ jobs:
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> "$GITHUB_ENV"
+          echo "MALLOC_ARENA_MAX=2" >> "$GITHUB_ENV"
           # If upstream enables LTO by default, overriding it helps cut peak
           # link memory and improves runner stability.
           echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
@@ -709,13 +712,14 @@ jobs:
           set -euo pipefail
           # If the runner OOM-kills the build, GitHub often reports it as
           # "lost communication". Adding swap trades speed for stability.
-          size_gb="6"
+          size_gb="10"
           if [[ ! -f /swapfile ]]; then
             sudo fallocate -l "${size_gb}G" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$((size_gb * 1024))"
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
           fi
           sudo swapon /swapfile || true
+          sudo sysctl vm.swappiness=180 || true
           free -h || true
           swapon --show || true
 
