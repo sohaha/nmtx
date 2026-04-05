@@ -690,6 +690,9 @@ jobs:
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
+          # If upstream enables LTO by default, overriding it helps cut peak
+          # link memory and improves runner stability.
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
           # Reduce peak memory pressure during linking. (musl targets override
           # RUSTFLAGS later with their own explicit linker settings.)
           extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
@@ -728,9 +731,15 @@ jobs:
             # for the flakiest target.
             timings=()
           fi
-          cargo build --target "${TARGET}" --release "${timings[@]}" \
-            --bin codex \
-            --bin codex-responses-api-proxy
+          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
+            # Link one binary at a time to reduce peak memory pressure.
+            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex
+            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+          else
+            cargo build --target "${TARGET}" --release "${timings[@]}" \
+              --bin codex \
+              --bin codex-responses-api-proxy
+          fi
 
       - name: Cargo build (Windows)
         if: ${{ runner.os == 'Windows' }}
