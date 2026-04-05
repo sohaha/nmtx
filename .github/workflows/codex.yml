@@ -723,12 +723,6 @@ jobs:
           free -h || true
           swapon --show || true
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ github.workspace }}/build-src/codex-rs -> target
-          key: build-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('build-src/codex-rs/Cargo.lock') }}
-
       - name: Cargo build (Unix)
         if: ${{ runner.os != 'Windows' }}
         shell: bash
