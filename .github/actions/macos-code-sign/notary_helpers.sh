@@ -21,7 +21,7 @@ retry_notary_command() {
       return "$exit_code"
     fi
 
-    echo "::warning title=Notary retry::${label} attempt ${attempt}/${max_attempts} failed, retrying in ${sleep_seconds}s"
+    echo "::warning title=Notary retry::${label} attempt ${attempt}/${max_attempts} failed, retrying in ${sleep_seconds}s" >&2
     sleep "$sleep_seconds"
     attempt=$((attempt + 1))
     sleep_seconds=$((sleep_seconds * 2))
