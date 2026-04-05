@@ -723,6 +723,12 @@ jobs:
           free -h || true
           swapon --show || true
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ github.workspace }}/build-src/codex-rs -> target
+          key: build-${{ runner.os }}-${{ env.TARGET }}-${{ hashFiles('build-src/codex-rs/Cargo.lock') }}
+
       - name: Cargo build (Unix)
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -1097,6 +1103,8 @@ jobs:
         if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
         uses: pnpm/action-setup@v4
         with:
+          version: 10.29.3
+          package_json_file: build-src/package.json
           run_install: false
 
       - name: Setup Node.js for npm packaging
