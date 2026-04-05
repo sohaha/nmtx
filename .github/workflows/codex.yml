@@ -1054,100 +1054,14 @@ jobs:
             fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
           git -C "$build_root" checkout --force FETCH_HEAD
 
-      - name: Verify source layout for release packaging
+      - name: Verify release artifacts
         shell: bash
         run: |
           set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
-          [[ -f "${build_root}/package.json" ]] || exit 1
-          [[ -f "${build_root}/pnpm-lock.yaml" ]] || exit 1
-          [[ -f "${build_root}/scripts/stage_npm_packages.py" ]] || exit 1
-          [[ -f "${build_root}/codex-cli/package.json" ]] || exit 1
-
-      - name: Determine npm staging settings
-        id: npm_staging_settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          required_targets=(
-            "x86_64-pc-windows-msvc"
-            "aarch64-pc-windows-msvc"
-            "aarch64-apple-darwin"
-            "x86_64-apple-darwin"
-            "x86_64-unknown-linux-musl"
-            "aarch64-unknown-linux-musl"
-          )
-          declare -A selected_targets=()
-          IFS=',' read -r -a requested_targets <<< "$TARGETS"
-          for target in "${requested_targets[@]}"; do
-            selected_targets["$target"]=1
-          done
-
-          has_full_install_matrix=true
-          for target in "${required_targets[@]}"; do
-            if [[ -z "${selected_targets[$target]:-}" ]]; then
-              has_full_install_matrix=false
-              break
-            fi
-          done
-
-          if [[ "$has_full_install_matrix" == "true" ]]; then
-            echo "should_stage=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Installer staging::full installer target matrix available"
-          else
-            echo "should_stage=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Installer staging skipped::musl installer targets are unavailable for the current source build; skipping npm/install staging"
-          fi
-
-      - name: Setup pnpm
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.29.3
-          package_json_file: build-src/package.json
-          run_install: false
-
-      - name: Setup Node.js for npm packaging
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Install dependencies for npm packaging
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src"
-          pnpm install --frozen-lockfile
-
-      - name: Install DotSlash
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        uses: facebook/install-dotslash@v2
-
-      - name: Stage npm packages
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src"
-          ./scripts/stage_npm_packages.py \
-            --workflow-url "$WORKFLOW_URL" \
-            --release-version "$RELEASE_VERSION" \
-            --output-dir "${GITHUB_WORKSPACE}/dist/npm" \
-            --package codex
-
-      - name: Stage installer scripts
-        if: ${{ steps.npm_staging_settings.outputs.should_stage == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
-          cp "${build_root}/scripts/install/install.sh" dist/install.sh
-          cp "${build_root}/scripts/install/install.ps1" dist/install.ps1
+          find dist -type f | grep -q . || {
+            echo "no downloaded build artifacts found"
+            exit 1
+          }
 
       - name: Write release notes
         shell: bash
