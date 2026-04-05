@@ -670,7 +670,13 @@ jobs:
           binding_dir="${RUNNER_TEMP}/rusty_v8"
           binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
           mkdir -p "${binding_dir}"
-          curl -fsSL "${base_url}/src_binding_release_${TARGET}.rs" -o "${binding_path}"
+          curl -fsSL \
+            --retry 5 \
+            --retry-connrefused \
+            --retry-delay 2 \
+            --max-time 120 \
+            "${base_url}/src_binding_release_${TARGET}.rs" \
+            -o "${binding_path}"
           echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
@@ -683,6 +689,15 @@ jobs:
           # parallelism can OOM/kill the runner and surface as "lost communication".
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
+          # Reduce peak memory pressure during linking. (musl targets override
+          # RUSTFLAGS later with their own explicit linker settings.)
+          extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
+          if [[ -n "${RUSTFLAGS:-}" ]]; then
+            extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
+          fi
+          echo "RUSTFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
 
       - name: Enable swap on aarch64 Linux runner
         if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
