@@ -488,6 +488,32 @@ jobs:
             print("no duplicate show_buddy entries found")
           PY
 
+      - name: Patch Windows arg0 filename comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_file="${GITHUB_WORKSPACE}/build-src/codex-rs/arg0/src/lib.rs"
+          if [[ ! -f "$target_file" ]]; then
+            echo "arg0 source not found; skip patch"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "arg0" / "src" / "lib.rs"
+          text = path.read_text(encoding="utf-8")
+          updated = text.replace(
+              "for filename in &[",
+              "for &filename in &[",
+          )
+          if updated != text:
+              path.write_text(updated, encoding="utf-8")
+              print("patched arg0 filename loop for windows string comparisons")
+          else:
+              print("arg0 filename loop already patched")
+          PY
+
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -671,13 +697,21 @@ jobs:
                   resolved = candidate
                   count++
                 }
-                if (count != 1) {
-                  exit 2
+                if (count == 0) {
+                  exit 0
+                }
+                if (count > 1) {
+                  exit 3
                 }
                 print resolved
               }
             ' "${GITHUB_WORKSPACE}/build-src/codex-rs/Cargo.lock"
+            || true
           )"
+          if [[ -z "$version" ]]; then
+            echo "no v8 dependency in Cargo.lock; skip rusty_v8 override"
+            exit 0
+          fi
           release_tag="rusty-v8-v${version}"
           base_url="https://github.com/openai/codex/releases/download/${release_tag}"
           archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
