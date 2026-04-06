@@ -667,6 +667,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          set +e
           version="$(
             awk '
               $0 == "[[package]]" {
@@ -706,8 +707,13 @@ jobs:
                 print resolved
               }
             ' "${GITHUB_WORKSPACE}/build-src/codex-rs/Cargo.lock"
-            || true
           )"
+          awk_status=$?
+          set -e
+          if [[ $awk_status -gt 1 ]]; then
+            echo "failed to resolve v8 version from Cargo.lock"
+            exit "$awk_status"
+          fi
           if [[ -z "$version" ]]; then
             echo "no v8 dependency in Cargo.lock; skip rusty_v8 override"
             exit 0
