@@ -12,8 +12,8 @@ name: Build Codex Release
       source_ref:
         required: true
         type: string
-        default: web
-        description: Source branch to build. Only web is allowed.
+        default: main
+        description: Source branch to build. Accepts main; web is kept as a compatibility alias.
       release_tag:
         required: false
         type: string
@@ -52,12 +52,11 @@ jobs:
       - name: Resolve payload
         id: payload
         shell: bash
-        env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             version="${{ github.event.client_payload.version }}"
-            source_ref="${{ github.event.client_payload.source_ref || 'web' }}"
+            source_ref="${{ github.event.client_payload.source_ref || 'main' }}"
             release_tag="${{ github.event.client_payload.release_tag }}"
             targets_input="${{ github.event.client_payload.targets || 'all' }}"
             release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
@@ -69,17 +68,24 @@ jobs:
             release_repo="${{ inputs.release_repo }}"
           fi
 
+          case "$source_ref" in
+            web)
+              source_ref="main"
+              ;;
+            main)
+              ;;
+            *)
+              echo "unsupported source_ref: $source_ref"
+              exit 1
+              ;;
+          esac
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "targets_input=${targets_input}" >> "$GITHUB_OUTPUT"
           echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
-
-          if [[ -n "${CNB_PASSWORD:-}" ]]; then
-            source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
-          else
-            source_url="https://github.com/${release_repo}"
-          fi
+          source_url="https://github.com/${release_repo}"
           echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
@@ -88,10 +94,10 @@ jobs:
           set -euo pipefail
           source_url="${{ steps.payload.outputs.source_url }}"
           release_repo="${{ steps.payload.outputs.release_repo }}"
-          if [[ "$source_url" != "https://cnb.cool/zls_nmtx/sohaha/zcodex" && "$source_url" != "https://github.com/${release_repo}" ]]; then
+          if [[ "$source_url" != "https://github.com/${release_repo}" ]]; then
             exit 1
           fi
-          [[ "${{ steps.payload.outputs.source_ref }}" == "web" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_ref }}" == "main" ]] || exit 1
           [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zcodex" ]] || exit 1
           [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
 
@@ -111,7 +117,6 @@ jobs:
         id: source
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_URL: ${{ steps.payload.outputs.source_url }}
@@ -119,18 +124,9 @@ jobs:
         run: |
           set -euo pipefail
           auth_args=()
-          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
-            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
-            if [[ -n "$source_token" ]]; then
-              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
-              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
-            fi
-          else
-            [[ -n "$CNB_PASSWORD" ]] || {
-              echo "missing CNB_PASSWORD secret"
-              exit 1
-            }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [[ -n "$source_token" ]]; then
+            basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
           source_sha="$(
@@ -324,25 +320,15 @@ jobs:
       - name: Fetch source at exact SHA
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           build_root="${GITHUB_WORKSPACE}/build-src"
           auth_args=()
-          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
-            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
-            if [[ -n "$source_token" ]]; then
-              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
-              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
-            fi
-          else
-            [[ -n "$CNB_PASSWORD" ]] || {
-              echo "missing CNB_PASSWORD secret"
-              exit 1
-            }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [[ -n "$source_token" ]]; then
+            basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
           rm -rf "$build_root"
@@ -397,7 +383,9 @@ jobs:
                   updated,
                   count=1,
               )
-              if count != 1:
+              if count == 0:
+                  print("fastembed dependency not found; skip compatibility patch")
+              elif count != 1:
                   raise SystemExit("failed to normalize fastembed dependency in Cargo.toml")
 
           cargo_toml.write_text(updated, encoding="utf-8")
@@ -1017,25 +1005,15 @@ jobs:
       - name: Fetch source metadata
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           build_root="${GITHUB_WORKSPACE}/build-src"
           auth_args=()
-          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
-            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
-            if [[ -n "$source_token" ]]; then
-              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
-              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
-            fi
-          else
-            [[ -n "$CNB_PASSWORD" ]] || {
-              echo "missing CNB_PASSWORD secret"
-              exit 1
-            }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+          source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [[ -n "$source_token" ]]; then
+            basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
           rm -rf "$build_root"
