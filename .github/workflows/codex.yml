@@ -527,11 +527,12 @@ jobs:
 
           $content = Get-Content -Raw -Path $configPath
           $updated = $content -replace '(?m)^rustc-wrapper = "scripts/rustc-wrapper\.sh"\r?\n?', ''
-          if ($updated -eq $content) {
-            throw "failed to remove Unix rustc-wrapper from $configPath"
+          if ($updated -ne $content) {
+            Set-Content -Path $configPath -Value $updated -Encoding utf8NoBOM
           }
-
-          Set-Content -Path $configPath -Value $updated -Encoding utf8NoBOM
+          else {
+            Write-Host "No Unix rustc-wrapper entry found in $configPath; skipping"
+          }
 
       - name: Use hermetic Cargo home
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
@@ -560,12 +561,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${CC:-}" ]]; then
-            echo "missing CC env for musl linker override" >&2
+          linker="${CC:-}"
+          if [[ -z "$linker" ]]; then
+            case "${TARGET}" in
+              x86_64-unknown-linux-musl)
+                linker="$(command -v x86_64-linux-musl-gcc || true)"
+                ;;
+              aarch64-unknown-linux-musl)
+                linker="$(command -v aarch64-linux-musl-gcc || true)"
+                ;;
+              *)
+                linker=""
+                ;;
+            esac
+          fi
+          if [[ -z "$linker" ]]; then
+            echo "missing musl linker for ${TARGET}" >&2
             exit 1
           fi
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${CC}" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${CC}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
 
       - name: Configure rustc UBSan wrapper
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
