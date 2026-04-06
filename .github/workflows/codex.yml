@@ -113,36 +113,6 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve source SHA
-        id: source
-        shell: bash
-        env:
-          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
-          GITHUB_TOKEN: ${{ github.token }}
-          SOURCE_URL: ${{ steps.payload.outputs.source_url }}
-          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
-        run: |
-          set -euo pipefail
-          auth_args=()
-          source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
-          if [[ -n "$source_token" ]]; then
-            basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
-            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
-          fi
-          source_sha="$(
-            git \
-              -c credential.helper= \
-              -c core.askPass= \
-              "${auth_args[@]}" \
-              ls-remote "$SOURCE_URL" "refs/heads/$SOURCE_REF" \
-              | awk '{print $1}'
-          )"
-          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "failed to resolve source sha for $SOURCE_REF"
-            exit 1
-          }
-          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
-
       - name: Normalize release tag
         id: release
         shell: bash
@@ -154,6 +124,47 @@ jobs:
           fi
           [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_URL: ${{ steps.payload.outputs.source_url }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          auth_args=()
+          source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [[ -n "$source_token" ]]; then
+            basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
+
+          ls_remote() {
+            git \
+              -c credential.helper= \
+              -c core.askPass= \
+              "${auth_args[@]}" \
+              ls-remote "$SOURCE_URL" "$1" \
+              | awk '{print $1}'
+          }
+
+          source_sha="$(ls_remote "refs/tags/$RELEASE_TAG")"
+          if [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolved source from tag $RELEASE_TAG"
+          else
+            source_sha="$(ls_remote "refs/heads/$SOURCE_REF")"
+            [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "failed to resolve source sha for tag $RELEASE_TAG or branch $SOURCE_REF"
+              exit 1
+            }
+            echo "resolved source from branch $SOURCE_REF"
+          fi
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Normalize targets
         id: targets
