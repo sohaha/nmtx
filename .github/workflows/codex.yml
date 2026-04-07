@@ -119,7 +119,7 @@ jobs:
         shell: bash
         env:
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${CODEBAY_RELEASE_WRITE_TOKEN:-}" ]]; then
@@ -127,8 +127,8 @@ jobs:
             echo "路径: Settings -> Secrets and variables -> Actions"
             exit 1
           fi
-          if [[ "${{ steps.payload.outputs.source_url }}" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" && -z "${CNB_PASSWORD:-}" ]]; then
-            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CNB_PASSWORD"
+          if [[ "${{ steps.payload.outputs.source_url }}" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" && -z "${CNB_TOKEN:-}" ]]; then
+            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CNB_TOKEN"
             echo "路径: Settings -> Secrets and variables -> Actions"
             exit 1
           fi
@@ -149,7 +149,7 @@ jobs:
         id: source
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_URL: ${{ steps.payload.outputs.source_url }}
@@ -165,11 +165,11 @@ jobs:
               auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
             fi
           else
-            [[ -n "${CNB_PASSWORD:-}" ]] || {
-              echo "missing CNB_PASSWORD secret"
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
               exit 1
             }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
 
@@ -377,7 +377,7 @@ jobs:
       - name: Fetch source at exact SHA
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -391,11 +391,11 @@ jobs:
               auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
             fi
           else
-            [[ -n "${CNB_PASSWORD:-}" ]] || {
-              echo "missing CNB_PASSWORD secret"
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
               exit 1
             }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
           rm -rf "$build_root"
@@ -1127,7 +1127,7 @@ jobs:
       - name: Fetch source metadata
         shell: bash
         env:
-          CNB_PASSWORD: ${{ secrets.CNB_PASSWORD }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -1141,11 +1141,11 @@ jobs:
               auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
             fi
           else
-            [[ -n "${CNB_PASSWORD:-}" ]] || {
-              echo "missing CNB_PASSWORD secret"
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
               exit 1
             }
-            basic_auth_token="$(printf '%s' "cnb:${CNB_PASSWORD}" | base64 | tr -d '\n')"
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
           rm -rf "$build_root"
