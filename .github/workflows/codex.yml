@@ -14,7 +14,7 @@ name: Build Codex Release
         required: true
         type: string
         default: web
-        description: Source branch to build. Accepts main; web is kept as a compatibility alias; also accepts the full CNB commit URL for zcodex.
+        description: Source branch or commit to build. Accepts main; web is kept as a compatibility alias; also accepts a bare 40-char commit SHA or the full CNB commit URL for zcodex.
       release_tag:
         required: false
         type: string
@@ -69,28 +69,32 @@ jobs:
             release_repo="${{ inputs.release_repo }}"
           fi
 
-          case "$source_ref" in
-            web)
-              source_ref="main"
-              source_url="https://github.com/${release_repo}"
-              ;;
-            main)
-              source_url="https://github.com/${release_repo}"
-              ;;
-            https://cnb.cool/zls_nmtx/sohaha/zcodex/-/commit/*)
-              if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zcodex/-/commit/([0-9a-f]{40})/?$ ]]; then
-                source_ref="${BASH_REMATCH[1]}"
-                source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
-              else
-                echo "unsupported cnb source_ref: $source_ref"
+          if [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            source_url="https://github.com/${release_repo}"
+          else
+            case "$source_ref" in
+              web)
+                source_ref="main"
+                source_url="https://github.com/${release_repo}"
+                ;;
+              main)
+                source_url="https://github.com/${release_repo}"
+                ;;
+              https://cnb.cool/zls_nmtx/sohaha/zcodex/-/commit/*)
+                if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zcodex/-/commit/([0-9a-f]{40})/?$ ]]; then
+                  source_ref="${BASH_REMATCH[1]}"
+                  source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
+                else
+                  echo "unsupported cnb source_ref: $source_ref"
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "unsupported source_ref: $source_ref"
                 exit 1
-              fi
-              ;;
-            *)
-              echo "unsupported source_ref: $source_ref"
-              exit 1
-              ;;
-          esac
+                ;;
+            esac
+          fi
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
@@ -106,7 +110,7 @@ jobs:
           source_url="${{ steps.payload.outputs.source_url }}"
           release_repo="${{ steps.payload.outputs.release_repo }}"
           if [[ "$source_url" == "https://github.com/${release_repo}" ]]; then
-            [[ "${{ steps.payload.outputs.source_ref }}" == "main" ]] || exit 1
+            [[ "${{ steps.payload.outputs.source_ref }}" == "main" || "${{ steps.payload.outputs.source_ref }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           elif [[ "$source_url" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" ]]; then
             [[ "${{ steps.payload.outputs.source_ref }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           else
