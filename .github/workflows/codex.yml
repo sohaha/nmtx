@@ -983,8 +983,9 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
 
           release_dir="target/${TARGET}/release"
-          dmg_root="${RUNNER_TEMP}/codex-dmg-root"
+          dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           dmg_path="${release_dir}/codex-${TARGET}.dmg"
+          tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
           volname="Codex (${TARGET})"
 
           codex_binary_path="${release_dir}/codex"
@@ -1004,13 +1005,27 @@ jobs:
           ditto "$codex_binary_path" "${dmg_root}/codex"
           ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
 
-          rm -f "$dmg_path"
-          hdiutil create \
-            -volname "$volname" \
-            -srcfolder "$dmg_root" \
-            -format UDZO \
-            -ov \
-            "$dmg_path"
+          rm -f "$dmg_path" "$tmp_dmg_path"
+          for attempt in 1 2 3; do
+            if hdiutil create \
+              -volname "$volname" \
+              -srcfolder "$dmg_root" \
+              -format UDZO \
+              -ov \
+              "$tmp_dmg_path"; then
+              mv "$tmp_dmg_path" "$dmg_path"
+              break
+            fi
+
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "failed to build dmg after ${attempt} attempts"
+              exit 1
+            fi
+
+            echo "hdiutil create failed on attempt ${attempt}; retrying after cleanup"
+            rm -f "$tmp_dmg_path"
+            sleep 5
+          done
 
           [[ -f "$dmg_path" ]] || {
             echo "dmg $dmg_path not found after build"
