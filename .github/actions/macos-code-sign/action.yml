@@ -165,14 +165,22 @@ runs:
             extra_codesign_args+=(--entitlements "$codex_entitlements")
           fi
 
-          codesign \
-            --force \
-            --options runtime \
-            --timestamp \
-            --sign "$APPLE_CODESIGN_IDENTITY" \
-            "${keychain_args[@]}" \
-            "${extra_codesign_args[@]}" \
-            "$path"
+          codesign_cmd=(
+            codesign
+            --force
+            --options runtime
+            --timestamp
+            --sign "$APPLE_CODESIGN_IDENTITY"
+          )
+          if ((${#keychain_args[@]} > 0)); then
+            codesign_cmd+=("${keychain_args[@]}")
+          fi
+          if ((${#extra_codesign_args[@]} > 0)); then
+            codesign_cmd+=("${extra_codesign_args[@]}")
+          fi
+          codesign_cmd+=("$path")
+
+          "${codesign_cmd[@]}"
         done
 
     - name: Notarize macOS binaries
