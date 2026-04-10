@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+version="${1:-}"
+source_ref="${2:-web}"
+targets="${3:-mac}"
+release_repo="${4:-sohaha/zcodex}"
+workflow_file="${WORKFLOW_FILE:-codex.yml}"
+ref="${GITHUB_REF_NAME:-$(git branch --show-current)}"
+
+if [[ -z "$version" ]]; then
+  echo "usage: mise run codex-ci -- <version> [source_ref] [targets] [release_repo]" >&2
+  exit 1
+fi
+
+args=(
+  workflow
+  run
+  "$workflow_file"
+  --ref
+  "$ref"
+  -f
+  "version=$version"
+  -f
+  "source_ref=$source_ref"
+  -f
+  "targets=$targets"
+  -f
+  "release_repo=$release_repo"
+)
+
+echo "gh ${args[*]}"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  exit 0
+fi
+
+gh "${args[@]}"

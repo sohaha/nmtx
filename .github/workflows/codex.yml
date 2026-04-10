@@ -975,6 +975,15 @@ jobs:
           apple-notarization-key-id: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
 
+      - name: Smoke test signed macOS artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          "target/${TARGET}/release/codex" --version
+          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+
       - name: Build macOS dmg
         if: ${{ runner.os == 'macOS' }}
         shell: bash
@@ -1058,6 +1067,7 @@ jobs:
           done
           codesign --verify --verbose=2 "${release_dir}/codex-${TARGET}.dmg"
           xcrun stapler validate "${release_dir}/codex-${TARGET}.dmg"
+
 
       - name: Stage artifacts
         shell: bash

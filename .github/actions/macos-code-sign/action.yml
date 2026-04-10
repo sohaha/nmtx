@@ -147,13 +147,32 @@ runs:
           keychain_args+=(--keychain "${APPLE_CODESIGN_KEYCHAIN}")
         fi
 
+        codex_entitlements="${GITHUB_ACTION_PATH}/codex.entitlements.plist"
         for binary in codex codex-responses-api-proxy; do
           path="${release_dir}/${binary}"
           if [[ ! -f "$path" ]]; then
             echo "Binary $path not found"
             exit 1
           fi
-          codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "${keychain_args[@]}" "$path"
+
+          extra_codesign_args=()
+          # Codex embeds V8 and needs JIT entitlement under hardened runtime.
+          if [[ "$binary" == "codex" ]]; then
+            if [[ ! -f "$codex_entitlements" ]]; then
+              echo "Entitlements file $codex_entitlements not found"
+              exit 1
+            fi
+            extra_codesign_args+=(--entitlements "$codex_entitlements")
+          fi
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            "${keychain_args[@]}" \
+            "${extra_codesign_args[@]}" \
+            "$path"
         done
 
     - name: Notarize macOS binaries
