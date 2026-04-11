@@ -1,0 +1,569 @@
+name: macos-code-sign
+description: Configure, sign, notarize, and clean up macOS code signing artifacts.
+inputs:
+  project-root:
+    description: Project root containing the Rust target directory.
+    required: false
+    default: codex-rs
+  target:
+    description: Rust compilation target triple (e.g. aarch64-apple-darwin).
+    required: true
+  sign-binaries:
+    description: Whether to sign and notarize the macOS binaries.
+    required: false
+    default: "true"
+  sign-dmg:
+    description: Whether to sign and notarize the macOS dmg.
+    required: false
+    default: "true"
+  apple-certificate:
+    description: Base64-encoded Apple signing certificate (P12).
+    required: true
+  apple-certificate-password:
+    description: Password for the signing certificate.
+    required: true
+  apple-notarization-key-p8:
+    description: Base64-encoded Apple notarization key (P8).
+    required: true
+  apple-notarization-key-id:
+    description: Apple notarization key ID.
+    required: true
+  apple-notarization-issuer-id:
+    description: Apple notarization issuer ID.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Configure Apple code signing
+      shell: bash
+      env:
+        KEYCHAIN_PASSWORD: actions
+        APPLE_CERTIFICATE: ${{ inputs.apple-certificate }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.apple-certificate-password }}
+      run: |
+        set -euo pipefail
+
+        decode_base64() {
+          local output_path="$1"
+          if printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          if printf '%s' "$APPLE_CERTIFICATE" | base64 -d > "$output_path" 2>/dev/null; then
+            return 0
+          fi
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$output_path"
+        }
+
+        if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+          echo "APPLE_CERTIFICATE is required for macOS signing"
+          exit 1
+        fi
+
+        if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+          echo "APPLE_CERTIFICATE_PASSWORD is required for macOS signing"
+          exit 1
+        fi
+
+        cert_path="${RUNNER_TEMP}/apple_signing_certificate.p12"
+        decode_base64 "$cert_path"
+
+        keychain_path="${RUNNER_TEMP}/codex-signing.keychain-db"
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+        security set-keychain-settings -lut 21600 "$keychain_path"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+
+        keychain_args=()
+        cleanup_keychain() {
+          if ((${#keychain_args[@]} > 0)); then
+            security list-keychains -s "${keychain_args[@]}" || true
+            security default-keychain -s "${keychain_args[0]}" || true
+          else
+            security list-keychains -s || true
+          fi
+          if [[ -f "$keychain_path" ]]; then
+            security delete-keychain "$keychain_path" || true
+          fi
+        }
+
+        while IFS= read -r keychain; do
+          [[ -n "$keychain" ]] && keychain_args+=("$keychain")
+        done < <(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+
+        if ((${#keychain_args[@]} > 0)); then
+          security list-keychains -s "$keychain_path" "${keychain_args[@]}"
+        else
+          security list-keychains -s "$keychain_path"
+        fi
+
+        security default-keychain -s "$keychain_path"
+        security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path" > /dev/null
+
+        codesign_hashes=()
+        while IFS= read -r hash; do
+          [[ -n "$hash" ]] && codesign_hashes+=("$hash")
+        done < <(security find-identity -v -p codesigning "$keychain_path" \
+          | sed -n 's/.*\([0-9A-F]\{40\}\).*/\1/p' \
+          | sort -u)
+
+        if ((${#codesign_hashes[@]} == 0)); then
+          echo "No signing identities found in $keychain_path"
+          cleanup_keychain
+          rm -f "$cert_path"
+          exit 1
+        fi
+
+        if ((${#codesign_hashes[@]} > 1)); then
+          echo "Multiple signing identities found in $keychain_path:"
+          printf '  %s\n' "${codesign_hashes[@]}"
+          cleanup_keychain
+          rm -f "$cert_path"
+          exit 1
+        fi
+
+        APPLE_CODESIGN_IDENTITY="${codesign_hashes[0]}"
+
+        rm -f "$cert_path"
+
+        echo "APPLE_CODESIGN_IDENTITY=$APPLE_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
+        echo "APPLE_CODESIGN_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+        echo "::add-mask::$APPLE_CODESIGN_IDENTITY"
+
+    - name: Sign macOS binaries
+      if: ${{ inputs.sign-binaries == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${APPLE_CODESIGN_IDENTITY:-}" ]]; then
+          echo "APPLE_CODESIGN_IDENTITY is required for macOS signing"
+          exit 1
+        fi
+
+        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+
+        keychain_args=()
+        if [[ -n "${APPLE_CODESIGN_KEYCHAIN:-}" && -f "${APPLE_CODESIGN_KEYCHAIN}" ]]; then
+          keychain_args+=(--keychain "${APPLE_CODESIGN_KEYCHAIN}")
+        fi
+
+        codex_entitlements="${GITHUB_ACTION_PATH}/codex.entitlements.plist"
+        for binary in codex codex-responses-api-proxy; do
+          path="${release_dir}/${binary}"
+          if [[ ! -f "$path" ]]; then
+            echo "Binary $path not found"
+            exit 1
+          fi
+
+          extra_codesign_args=()
+          # Codex embeds V8 and needs JIT entitlement under hardened runtime.
+          if [[ "$binary" == "codex" ]]; then
+            if [[ ! -f "$codex_entitlements" ]]; then
+              echo "Entitlements file $codex_entitlements not found"
+              exit 1
+            fi
+            extra_codesign_args+=(--entitlements "$codex_entitlements")
+          fi
+
+          codesign_cmd=(
+            codesign
+            --force
+            --options runtime
+            --timestamp
+            --sign "$APPLE_CODESIGN_IDENTITY"
+          )
+          if ((${#keychain_args[@]} > 0)); then
+            codesign_cmd+=("${keychain_args[@]}")
+          fi
+          if ((${#extra_codesign_args[@]} > 0)); then
+            codesign_cmd+=("${extra_codesign_args[@]}")
+          fi
+          codesign_cmd+=("$path")
+
+          "${codesign_cmd[@]}"
+        done
+
+    - name: Notarize macOS binaries
+      if: ${{ inputs.sign-binaries == 'true' }}
+      shell: bash
+      env:
+        APPLE_NOTARIZATION_KEY_P8: ${{ inputs.apple-notarization-key-p8 }}
+        APPLE_NOTARIZATION_KEY_ID: ${{ inputs.apple-notarization-key-id }}
+        APPLE_NOTARIZATION_ISSUER_ID: ${{ inputs.apple-notarization-issuer-id }}
+      run: |
+        set -euo pipefail
+
+        write_notary_key() {
+          local output_path="$1"
+          local raw_secret unquoted_secret
+
+          strip_wrapping_quotes() {
+            local value="$1"
+            local first_char last_char
+            if ((${#value} >= 2)); then
+              first_char="${value:0:1}"
+              last_char="${value: -1}"
+              if [[ ("$first_char" == '"' || "$first_char" == "'") && "$first_char" == "$last_char" ]]; then
+                printf '%s' "${value:1:${#value}-2}"
+                return 0
+              fi
+            fi
+            printf '%s' "$value"
+          }
+
+          decode_base64_value() {
+            local value="$1"
+            local target_path="$2"
+            if printf '%s' "$value" | base64 --decode > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            if printf '%s' "$value" | base64 -d > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$value" | base64 -D > "$target_path" 2>/dev/null
+          }
+
+          validate_key_path() {
+            local candidate_path="$1"
+            local normalized_path="${candidate_path}.normalized"
+            local pem_path="${candidate_path}.pem"
+
+            if openssl pkey -in "$candidate_path" -inform PEM -noout >/dev/null 2>&1; then
+              echo "::notice title=Notary key::validated notary key as PEM"
+              return 0
+            fi
+
+            LC_ALL=C tr -d '\r' < "$candidate_path" > "$normalized_path"
+            if openssl pkey -in "$normalized_path" -inform PEM -noout >/dev/null 2>&1; then
+              mv "$normalized_path" "$candidate_path"
+              echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+              return 0
+            fi
+            rm -f "$normalized_path"
+
+            if openssl pkey -in "$candidate_path" -inform DER -noout >/dev/null 2>&1; then
+              openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$candidate_path" -out "$pem_path" >/dev/null 2>&1
+              mv "$pem_path" "$candidate_path"
+              echo "::notice title=Notary key::converted DER notary key to PEM"
+              return 0
+            fi
+
+            rm -f "$pem_path"
+            return 1
+          }
+
+          write_text_candidate() {
+            local value="$1"
+            local target_path="$2"
+            local label="$3"
+            local normalized_value
+
+            normalized_value="$(strip_wrapping_quotes "$value")"
+            normalized_value="${normalized_value//\\r\\n/$'\n'}"
+            normalized_value="${normalized_value//\\n/$'\n'}"
+            normalized_value="${normalized_value//\\r/$'\r'}"
+
+            printf '%s\n' "$normalized_value" > "$target_path"
+            echo "::notice title=Notary key::$label"
+          }
+
+          decoded_printable_text() {
+            local candidate_path="$1"
+            LC_ALL=C grep -q '[^[:print:][:space:]]' "$candidate_path" && return 1
+            return 0
+          }
+
+          try_decoded_text_variants() {
+            local candidate_path="$1"
+            local target_path="$2"
+            local decoded_text compact_text
+
+            decoded_printable_text "$candidate_path" || return 1
+            decoded_text="$(cat "$candidate_path")"
+
+            write_text_candidate "$decoded_text" "$target_path" "normalized decoded notary key text"
+            if validate_key_path "$target_path"; then
+              return 0
+            fi
+
+            compact_text="$(printf '%s' "$decoded_text" | tr -d '[:space:]')"
+            if [[ "$compact_text" =~ ^[A-Za-z0-9+/=]+$ ]] && decode_base64_value "$compact_text" "$target_path"; then
+              echo "::notice title=Notary key::decoded nested base64 notary key payload"
+              if validate_key_path "$target_path"; then
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          raw_secret="$APPLE_NOTARIZATION_KEY_P8"
+          unquoted_secret="$(strip_wrapping_quotes "$raw_secret")"
+
+          if decode_base64_value "$raw_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          if [[ "$unquoted_secret" != "$raw_secret" ]] && decode_base64_value "$unquoted_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded quoted APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          write_text_candidate "$raw_secret" "$output_path" "wrote raw APPLE_NOTARIZATION_KEY_P8"
+          if validate_key_path "$output_path"; then
+            return 0
+          fi
+
+          if [[ "$unquoted_secret" != "$raw_secret" ]]; then
+            write_text_candidate "$unquoted_secret" "$output_path" "wrote unquoted APPLE_NOTARIZATION_KEY_P8"
+            if validate_key_path "$output_path"; then
+              return 0
+            fi
+          fi
+
+          echo "APPLE_NOTARIZATION_KEY_P8 did not decode to a valid PEM or DER private key"
+          exit 1
+        }
+
+        for var in APPLE_NOTARIZATION_KEY_P8 APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID; do
+          if [[ -z "${!var:-}" ]]; then
+            echo "$var is required for notarization"
+            exit 1
+          fi
+        done
+
+        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+        notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
+        write_notary_key "$notary_key_path"
+        cleanup_notary() {
+          rm -f "$notary_key_path"
+        }
+        trap cleanup_notary EXIT
+
+        source "$GITHUB_ACTION_PATH/notary_helpers.sh"
+
+        notarize_binary() {
+          local binary="$1"
+          local source_path="${release_dir}/${binary}"
+          local archive_path="${RUNNER_TEMP}/${binary}.zip"
+
+          if [[ ! -f "$source_path" ]]; then
+            echo "Binary $source_path not found"
+            exit 1
+          fi
+
+          rm -f "$archive_path"
+          ditto -c -k --keepParent "$source_path" "$archive_path"
+
+          notarize_submission "$binary" "$archive_path" "$notary_key_path"
+        }
+
+        notarize_binary "codex"
+        notarize_binary "codex-responses-api-proxy"
+
+    - name: Sign and notarize macOS dmg
+      if: ${{ inputs.sign-dmg == 'true' }}
+      shell: bash
+      env:
+        APPLE_NOTARIZATION_KEY_P8: ${{ inputs.apple-notarization-key-p8 }}
+        APPLE_NOTARIZATION_KEY_ID: ${{ inputs.apple-notarization-key-id }}
+        APPLE_NOTARIZATION_ISSUER_ID: ${{ inputs.apple-notarization-issuer-id }}
+      run: |
+        set -euo pipefail
+
+        write_notary_key() {
+          local output_path="$1"
+          local raw_secret unquoted_secret
+
+          strip_wrapping_quotes() {
+            local value="$1"
+            local first_char last_char
+            if ((${#value} >= 2)); then
+              first_char="${value:0:1}"
+              last_char="${value: -1}"
+              if [[ ("$first_char" == '"' || "$first_char" == "'") && "$first_char" == "$last_char" ]]; then
+                printf '%s' "${value:1:${#value}-2}"
+                return 0
+              fi
+            fi
+            printf '%s' "$value"
+          }
+
+          decode_base64_value() {
+            local value="$1"
+            local target_path="$2"
+            if printf '%s' "$value" | base64 --decode > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            if printf '%s' "$value" | base64 -d > "$target_path" 2>/dev/null; then
+              return 0
+            fi
+            printf '%s' "$value" | base64 -D > "$target_path" 2>/dev/null
+          }
+
+          validate_key_path() {
+            local candidate_path="$1"
+            local normalized_path="${candidate_path}.normalized"
+            local pem_path="${candidate_path}.pem"
+
+            if openssl pkey -in "$candidate_path" -inform PEM -noout >/dev/null 2>&1; then
+              echo "::notice title=Notary key::validated notary key as PEM"
+              return 0
+            fi
+
+            LC_ALL=C tr -d '\r' < "$candidate_path" > "$normalized_path"
+            if openssl pkey -in "$normalized_path" -inform PEM -noout >/dev/null 2>&1; then
+              mv "$normalized_path" "$candidate_path"
+              echo "::notice title=Notary key::validated notary key as PEM after CRLF normalization"
+              return 0
+            fi
+            rm -f "$normalized_path"
+
+            if openssl pkey -in "$candidate_path" -inform DER -noout >/dev/null 2>&1; then
+              openssl pkcs8 -inform DER -outform PEM -nocrypt -in "$candidate_path" -out "$pem_path" >/dev/null 2>&1
+              mv "$pem_path" "$candidate_path"
+              echo "::notice title=Notary key::converted DER notary key to PEM"
+              return 0
+            fi
+
+            rm -f "$pem_path"
+            return 1
+          }
+
+          write_text_candidate() {
+            local value="$1"
+            local target_path="$2"
+            local label="$3"
+            local normalized_value
+
+            normalized_value="$(strip_wrapping_quotes "$value")"
+            normalized_value="${normalized_value//\\r\\n/$'\n'}"
+            normalized_value="${normalized_value//\\n/$'\n'}"
+            normalized_value="${normalized_value//\\r/$'\r'}"
+
+            printf '%s\n' "$normalized_value" > "$target_path"
+            echo "::notice title=Notary key::$label"
+          }
+
+          decoded_printable_text() {
+            local candidate_path="$1"
+            LC_ALL=C grep -q '[^[:print:][:space:]]' "$candidate_path" && return 1
+            return 0
+          }
+
+          try_decoded_text_variants() {
+            local candidate_path="$1"
+            local target_path="$2"
+            local decoded_text compact_text
+
+            decoded_printable_text "$candidate_path" || return 1
+            decoded_text="$(cat "$candidate_path")"
+
+            write_text_candidate "$decoded_text" "$target_path" "normalized decoded notary key text"
+            if validate_key_path "$target_path"; then
+              return 0
+            fi
+
+            compact_text="$(printf '%s' "$decoded_text" | tr -d '[:space:]')"
+            if [[ "$compact_text" =~ ^[A-Za-z0-9+/=]+$ ]] && decode_base64_value "$compact_text" "$target_path"; then
+              echo "::notice title=Notary key::decoded nested base64 notary key payload"
+              if validate_key_path "$target_path"; then
+                return 0
+              fi
+            fi
+
+            return 1
+          }
+
+          raw_secret="$APPLE_NOTARIZATION_KEY_P8"
+          unquoted_secret="$(strip_wrapping_quotes "$raw_secret")"
+
+          if decode_base64_value "$raw_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          if [[ "$unquoted_secret" != "$raw_secret" ]] && decode_base64_value "$unquoted_secret" "$output_path"; then
+            echo "::notice title=Notary key::decoded quoted APPLE_NOTARIZATION_KEY_P8 as base64"
+            if validate_key_path "$output_path" || try_decoded_text_variants "$output_path" "$output_path"; then
+              return 0
+            fi
+          fi
+
+          write_text_candidate "$raw_secret" "$output_path" "wrote raw APPLE_NOTARIZATION_KEY_P8"
+          if validate_key_path "$output_path"; then
+            return 0
+          fi
+
+          if [[ "$unquoted_secret" != "$raw_secret" ]]; then
+            write_text_candidate "$unquoted_secret" "$output_path" "wrote unquoted APPLE_NOTARIZATION_KEY_P8"
+            if validate_key_path "$output_path"; then
+              return 0
+            fi
+          fi
+
+          echo "APPLE_NOTARIZATION_KEY_P8 did not decode to a valid PEM or DER private key"
+          exit 1
+        }
+
+        for var in APPLE_CODESIGN_IDENTITY APPLE_NOTARIZATION_KEY_P8 APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID; do
+          if [[ -z "${!var:-}" ]]; then
+            echo "$var is required"
+            exit 1
+          fi
+        done
+
+        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+        notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
+        dmg_path="${release_dir}/codex-${{ inputs.target }}.dmg"
+        write_notary_key "$notary_key_path"
+        cleanup_notary() {
+          rm -f "$notary_key_path"
+        }
+        trap cleanup_notary EXIT
+
+        source "$GITHUB_ACTION_PATH/notary_helpers.sh"
+
+        if [[ ! -f "$dmg_path" ]]; then
+          echo "dmg $dmg_path not found"
+          exit 1
+        fi
+
+        keychain_args=()
+        if [[ -n "${APPLE_CODESIGN_KEYCHAIN:-}" && -f "${APPLE_CODESIGN_KEYCHAIN}" ]]; then
+          keychain_args+=(--keychain "${APPLE_CODESIGN_KEYCHAIN}")
+        fi
+
+        codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "${keychain_args[@]}" "$dmg_path"
+        notarize_submission "codex-${{ inputs.target }}.dmg" "$dmg_path" "$notary_key_path"
+        retry_notary_command "staple codex-${{ inputs.target }}.dmg" xcrun stapler staple "$dmg_path"
+
+    - name: Remove signing keychain
+      if: ${{ always() }}
+      shell: bash
+      env:
+        APPLE_CODESIGN_KEYCHAIN: ${{ env.APPLE_CODESIGN_KEYCHAIN }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${APPLE_CODESIGN_KEYCHAIN:-}" ]]; then
+          keychain_args=()
+          while IFS= read -r keychain; do
+            [[ "$keychain" == "$APPLE_CODESIGN_KEYCHAIN" ]] && continue
+            [[ -n "$keychain" ]] && keychain_args+=("$keychain")
+          done < <(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+          if ((${#keychain_args[@]} > 0)); then
+            security list-keychains -s "${keychain_args[@]}"
+            security default-keychain -s "${keychain_args[0]}"
+          fi
+
+          if [[ -f "$APPLE_CODESIGN_KEYCHAIN" ]]; then
+            security delete-keychain "$APPLE_CODESIGN_KEYCHAIN"
+          fi
+        fi

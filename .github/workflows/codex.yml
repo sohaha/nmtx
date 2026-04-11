@@ -1,0 +1,1275 @@
+name: Build Codex Release
+
+'on':
+  repository_dispatch:
+    types: [build-codex-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+        default: 1.0.0
+        description: Release version, for example 1.2.3 or 1.2.3-alpha.1
+      source_ref:
+        required: true
+        type: string
+        default: web
+        description: Source branch or commit to build from CNB. Accepts branch names, a bare 40-char commit SHA, or the full CNB commit URL for zcodex.
+      release_tag:
+        required: false
+        type: string
+        description: Optional GitHub release tag. Defaults to v<version>.
+      targets:
+        required: false
+        type: string
+        default: all
+        description: Optional comma-separated targets. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/zcodex
+
+permissions:
+  contents: read
+
+env:
+  # Opt into Node.js 24 for JavaScript-based actions ahead of the runner default
+  # flip in 2026 to avoid surprise breakages.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_url: ${{ steps.payload.outputs.source_url }}
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      targets: ${{ steps.targets.outputs.targets }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            version="${{ github.event.client_payload.version }}"
+            source_ref="${{ github.event.client_payload.source_ref || 'main' }}"
+            release_tag="${{ github.event.client_payload.release_tag }}"
+            targets_input="${{ github.event.client_payload.targets || 'all' }}"
+            release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
+          else
+            version="${{ inputs.version }}"
+            source_ref="${{ inputs.source_ref }}"
+            release_tag="${{ inputs.release_tag }}"
+            targets_input="${{ inputs.targets }}"
+            release_repo="${{ inputs.release_repo }}"
+          fi
+
+          source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
+          case "$source_ref" in
+            https://cnb.cool/zls_nmtx/sohaha/zcodex/-/commit/*)
+              if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zcodex/-/commit/([0-9a-f]{40})/?$ ]]; then
+                source_ref="${BASH_REMATCH[1]}"
+              else
+                echo "unsupported cnb source_ref: $source_ref"
+                exit 1
+              fi
+              ;;
+            *)
+              if [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                :
+              elif [[ "$source_ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                :
+              else
+                echo "unsupported source_ref: $source_ref"
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "targets_input=${targets_input}" >> "$GITHUB_OUTPUT"
+          echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
+          echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_url="${{ steps.payload.outputs.source_url }}"
+          [[ "$source_url" == "https://cnb.cool/zls_nmtx/sohaha/zcodex" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_ref }}" =~ ^[0-9a-f]{40}$ || "${{ steps.payload.outputs.source_ref }}" =~ ^[A-Za-z0-9._/-]+$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zcodex" ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODEBAY_RELEASE_WRITE_TOKEN:-}" ]]; then
+            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CODEBAY_RELEASE_WRITE_TOKEN"
+            echo "路径: Settings -> Secrets and variables -> Actions"
+            exit 1
+          fi
+          if [[ -z "${CNB_TOKEN:-}" ]]; then
+            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CNB_TOKEN"
+            echo "路径: Settings -> Secrets and variables -> Actions"
+            exit 1
+          fi
+
+      - name: Normalize release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag='${{ steps.payload.outputs.release_tag }}'
+          if [[ -z "$release_tag" ]]; then
+            release_tag="v${{ steps.payload.outputs.version }}"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_URL: ${{ steps.payload.outputs.source_url }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
+
+          ls_remote() {
+            git \
+              -c credential.helper= \
+              -c core.askPass= \
+              "${auth_args[@]}" \
+              ls-remote "$SOURCE_URL" "$1" \
+              | awk '{print $1}'
+          }
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            tmpdir="$(mktemp -d)"
+            trap 'rm -rf "$tmpdir"' EXIT
+            git init -q "$tmpdir"
+            git \
+              -C "$tmpdir" \
+              -c credential.helper= \
+              -c core.askPass= \
+              "${auth_args[@]}" \
+              fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF" >/dev/null
+            source_sha="$(git -C "$tmpdir" rev-parse FETCH_HEAD)"
+            rm -rf "$tmpdir"
+            trap - EXIT
+            echo "resolved source from explicit commit $SOURCE_REF"
+          else
+            source_sha="$(ls_remote "refs/tags/$RELEASE_TAG")"
+            if [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "resolved source from tag $RELEASE_TAG"
+            else
+              source_sha="$(ls_remote "refs/heads/$SOURCE_REF")"
+              [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "failed to resolve source sha for tag $RELEASE_TAG or branch $SOURCE_REF"
+                exit 1
+              }
+              echo "resolved source from branch $SOURCE_REF"
+            fi
+          fi
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_targets='${{ steps.payload.outputs.targets_input }}'
+          raw_targets="${raw_targets//[[:space:]]/}"
+          [[ -n "$raw_targets" ]] || raw_targets="all"
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$raw_targets"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              windows)
+                expanded=(
+                  "x86_64-pc-windows-msvc|windows-latest"
+                  "aarch64-pc-windows-msvc|windows-latest"
+                )
+                ;;
+              mac)
+                expanded=("aarch64-apple-darwin|macos-15" "x86_64-apple-darwin|macos-15")
+                ;;
+              linux)
+                expanded=(
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                )
+                ;;
+              linux-gnu)
+                expanded=(
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                )
+                ;;
+              linux-musl)
+                expanded=(
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
+                )
+                ;;
+              all)
+                expanded=(
+                  "x86_64-pc-windows-msvc|windows-latest"
+                  "aarch64-pc-windows-msvc|windows-latest"
+                  "aarch64-apple-darwin|macos-15"
+                  "x86_64-apple-darwin|macos-15"
+                  "x86_64-unknown-linux-musl|ubuntu-22.04"
+                  "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
+                  "x86_64-unknown-linux-gnu|ubuntu-22.04"
+                  "aarch64-unknown-linux-gnu|ubuntu-24.04-arm"
+                )
+                ;;
+              x86_64-pc-windows-msvc)
+                expanded=("x86_64-pc-windows-msvc|windows-latest")
+                ;;
+              aarch64-pc-windows-msvc)
+                expanded=("aarch64-pc-windows-msvc|windows-latest")
+                ;;
+              aarch64-apple-darwin)
+                expanded=("aarch64-apple-darwin|macos-15")
+                ;;
+              x86_64-apple-darwin)
+                expanded=("x86_64-apple-darwin|macos-15")
+                ;;
+              x86_64-unknown-linux-gnu)
+                expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-gnu)
+                expanded=("aarch64-unknown-linux-gnu|ubuntu-24.04-arm")
+                ;;
+              x86_64-unknown-linux-musl)
+                expanded=("x86_64-unknown-linux-musl|ubuntu-22.04")
+                ;;
+              aarch64-unknown-linux-musl)
+                expanded=("aarch64-unknown-linux-musl|ubuntu-24.04-arm")
+                ;;
+              *)
+                echo "invalid target: $item"
+                exit 1
+                ;;
+            esac
+
+            for pair in "${expanded[@]}"; do
+              target="${pair%%|*}"
+              runner="${pair##*|}"
+              if [[ -z "${seen[$target]:-}" ]]; then
+                seen[$target]=1
+                normalized+=("$target|$runner")
+              fi
+            done
+          done
+
+          targets_csv=""
+          matrix="["
+          for pair in "${normalized[@]}"; do
+            target="${pair%%|*}"
+            runner="${pair##*|}"
+            if [[ -n "$targets_csv" ]]; then
+              targets_csv+=","
+            fi
+            targets_csv+="$target"
+            matrix+="{\"target\":\"$target\",\"runner\":\"$runner\"},"
+          done
+          matrix="${matrix%,}]"
+
+          echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+      - name: Validate macOS signing secrets
+        if: ${{ contains(steps.targets.outputs.targets, 'apple-darwin') }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v6
+
+      - name: Fetch source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
+          rm -rf "$build_root"
+          git init "$build_root"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            "${auth_args[@]}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      - name: Verify source layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          [[ -f "${build_root}/codex-rs/Cargo.toml" ]] || exit 1
+          [[ -f "${build_root}/.github/scripts/install-musl-build-tools.sh" ]] || exit 1
+          [[ -f "${build_root}/scripts/install/install.sh" ]] || exit 1
+          [[ -f "${build_root}/scripts/install/install.ps1" ]] || exit 1
+
+      - name: Sync Cargo workspace version from release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ["RELEASE_VERSION"]
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?", version) is None:
+              raise SystemExit(f"unsupported release version: {version}")
+
+          cargo_toml = pathlib.Path("Cargo.toml")
+          content = cargo_toml.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              content,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("failed to update workspace version in Cargo.toml")
+
+          if 'ort-load-dynamic' not in updated:
+              updated, count = re.subn(
+                  r'(?m)^fastembed = "([^"]+)"$',
+                  r'fastembed = { version = "\1", default-features = false, features = ["hf-hub-native-tls", "image-models", "ort-load-dynamic"] }',
+                  updated,
+                  count=1,
+              )
+              if count == 0:
+                  print("fastembed dependency not found; skip compatibility patch")
+              elif count != 1:
+                  raise SystemExit("failed to normalize fastembed dependency in Cargo.toml")
+
+          cargo_toml.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Patch duplicate show_buddy config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "config" / "src"
+          if not root.exists():
+            raise SystemExit(f"missing config src dir: {root}")
+
+          def fix_file(path: pathlib.Path) -> bool:
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines(keepends=True)
+            changed = False
+
+            out = []
+            in_tui_struct = False
+            show_buddy_seen = False
+            for line in lines:
+              if not in_tui_struct and re.search(r'\bstruct\s+Tui\s*\{', line):
+                in_tui_struct = True
+                show_buddy_seen = False
+                out.append(line)
+                continue
+              if in_tui_struct and re.search(r'^\s*}\s*$', line):
+                in_tui_struct = False
+                show_buddy_seen = False
+                out.append(line)
+                continue
+              if in_tui_struct and re.search(r'\bshow_buddy\s*:', line):
+                if show_buddy_seen:
+                  while out and re.match(r'^\s*(///|#\[|\s*$)', out[-1]):
+                    out.pop()
+                  changed = True
+                  continue
+                show_buddy_seen = True
+                out.append(line)
+                continue
+              out.append(line)
+
+            final = []
+            in_tui_literal = False
+            brace_depth = 0
+            show_buddy_seen_lit = False
+            for line in out:
+              stripped = line.lstrip()
+              if (not in_tui_literal and "Tui {" in line and "struct" not in line
+                  and not stripped.startswith("//")):
+                in_tui_literal = True
+                show_buddy_seen_lit = False
+                brace_depth = line.count("{") - line.count("}")
+                final.append(line)
+                continue
+              if in_tui_literal:
+                if re.search(r'\bshow_buddy\s*:', line):
+                  if show_buddy_seen_lit:
+                    changed = True
+                  else:
+                    show_buddy_seen_lit = True
+                    final.append(line)
+                else:
+                  final.append(line)
+                brace_depth += line.count("{") - line.count("}")
+                if brace_depth <= 0:
+                  in_tui_literal = False
+                continue
+              final.append(line)
+
+            if changed:
+              path.write_text("".join(final), encoding="utf-8")
+            return changed
+
+          any_changed = False
+          for path in root.rglob("*.rs"):
+            if fix_file(path):
+              any_changed = True
+
+          if any_changed:
+            print("patched duplicate show_buddy entries")
+          else:
+            print("no duplicate show_buddy entries found")
+          PY
+
+      - name: Patch Windows arg0 filename comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_file="${GITHUB_WORKSPACE}/build-src/codex-rs/arg0/src/lib.rs"
+          if [[ ! -f "$target_file" ]]; then
+            echo "arg0 source not found; skip patch"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "arg0" / "src" / "lib.rs"
+          text = path.read_text(encoding="utf-8")
+          updated = text.replace(
+              "for filename in &[",
+              "for &filename in &[",
+          )
+          if updated != text:
+              path.write_text(updated, encoding="utf-8")
+              print("patched arg0 filename loop for windows string comparisons")
+          else:
+              print("arg0 filename loop already patched")
+          PY
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev binutils
+
+      - name: Install UBSan runtime
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libubsan1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Setup MSVC toolchain
+        if: ${{ runner.os == 'Windows' }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ env.TARGET == 'aarch64-pc-windows-msvc' && 'amd64_arm64' || 'amd64' }}
+
+      - name: Disable Unix rustc wrapper on Windows
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $configPath = Join-Path $env:GITHUB_WORKSPACE 'build-src/codex-rs/.cargo/config.toml'
+          if (-not (Test-Path $configPath)) {
+            throw "missing Cargo config: $configPath"
+          }
+
+          $content = Get-Content -Raw -Path $configPath
+          $updated = $content -replace '(?m)^rustc-wrapper = "scripts/rustc-wrapper\.sh"\r?\n?', ''
+          if ($updated -ne $content) {
+            Set-Content -Path $configPath -Value $updated -Encoding utf8NoBOM
+          }
+          else {
+            Write-Host "No Unix rustc-wrapper entry found in $configPath; skipping"
+          }
+
+      - name: Use hermetic Cargo home
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install musl build tools
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Use Zig linker for musl targets
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          linker="${CC:-}"
+          if [[ -z "$linker" ]]; then
+            case "${TARGET}" in
+              x86_64-unknown-linux-musl)
+                linker="$(command -v x86_64-linux-musl-gcc || true)"
+                ;;
+              aarch64-unknown-linux-musl)
+                linker="$(command -v aarch64-linux-musl-gcc || true)"
+                ;;
+              *)
+                linker=""
+                ;;
+            esac
+          fi
+          if [[ -z "$linker" ]]; then
+            echo "missing musl linker for ${TARGET}" >&2
+            exit 1
+          fi
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
+
+      - name: Configure rustc UBSan wrapper
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Clear sanitizer flags
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the musl linker configuration explicit, and add a best-effort
+          # hint to reduce linker peak memory on constrained runners.
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          printf 'CARGO_ENCODED_RUSTFLAGS=-C\x1flink-arg=-lm\x1f-C\x1flink-self-contained=no\n' >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+          sanitize_flags() {
+            local input="$1"
+            input="${input//-fsanitize=undefined/}"
+            input="${input//-fno-sanitize-recover=undefined/}"
+            input="${input//-fno-sanitize-trap=undefined/}"
+            echo "$input"
+          }
+
+          echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
+
+      - name: Configure musl rusty_v8 artifact overrides
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          version="$(
+            awk '
+              $0 == "[[package]]" {
+                if (in_pkg && name == "v8" && version != "") {
+                  seen[version] = 1
+                }
+                in_pkg = 1
+                name = ""
+                version = ""
+                next
+              }
+              in_pkg && /^name = "v8"$/ {
+                name = "v8"
+                next
+              }
+              in_pkg && /^version = "/ {
+                version = $0
+                sub(/^version = "/, "", version)
+                sub(/"$/, "", version)
+                next
+              }
+              END {
+                if (in_pkg && name == "v8" && version != "") {
+                  seen[version] = 1
+                }
+                count = 0
+                for (candidate in seen) {
+                  resolved = candidate
+                  count++
+                }
+                if (count == 0) {
+                  exit 0
+                }
+                if (count > 1) {
+                  exit 3
+                }
+                print resolved
+              }
+            ' "${GITHUB_WORKSPACE}/build-src/codex-rs/Cargo.lock"
+          )"
+          awk_status=$?
+          set -e
+          if [[ $awk_status -gt 1 ]]; then
+            echo "failed to resolve v8 version from Cargo.lock"
+            exit "$awk_status"
+          fi
+          if [[ -z "$version" ]]; then
+            echo "no v8 dependency in Cargo.lock; skip rusty_v8 override"
+            exit 0
+          fi
+          release_tag="rusty-v8-v${version}"
+          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
+          archive="${base_url}/librusty_v8_release_${TARGET}.a.gz"
+          binding_dir="${RUNNER_TEMP}/rusty_v8"
+          binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
+          mkdir -p "${binding_dir}"
+          curl -fsSL \
+            --retry 5 \
+            --retry-connrefused \
+            --retry-delay 2 \
+            --max-time 120 \
+            "${base_url}/src_binding_release_${TARGET}.rs" \
+            -o "${binding_path}"
+          echo "RUSTY_V8_ARCHIVE=${archive}" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
+
+      - name: Reduce Rust build parallelism on aarch64 Linux
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The ubuntu-24.04-arm hosted runner is relatively constrained; rustc
+          # parallelism can OOM/kill the runner and surface as "lost communication".
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> "$GITHUB_ENV"
+          echo "MALLOC_ARENA_MAX=2" >> "$GITHUB_ENV"
+          # If upstream enables LTO by default, overriding it helps cut peak
+          # link memory and improves runner stability.
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          # Reduce peak memory pressure during linking. (musl targets override
+          # RUSTFLAGS later with their own explicit linker settings.)
+          extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
+          if [[ -n "${RUSTFLAGS:-}" ]]; then
+            extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
+          fi
+          echo "RUSTFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+
+      - name: Enable swap on aarch64 Linux runner
+        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # If the runner OOM-kills the build, GitHub often reports it as
+          # "lost communication". Adding swap trades speed for stability.
+          size_gb="10"
+          if [[ ! -f /swapfile ]]; then
+            sudo fallocate -l "${size_gb}G" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$((size_gb * 1024))"
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+          fi
+          sudo swapon /swapfile || true
+          sudo sysctl vm.swappiness=180 || true
+          free -h || true
+          swapon --show || true
+
+      - name: Cargo build (Unix)
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          timings=(--timings)
+          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
+            # Timings add extra I/O on a slow/constrained runner; not worth it
+            # for the flakiest target.
+            timings=()
+          fi
+          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
+            # Link one binary at a time to reduce peak memory pressure.
+            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex
+            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+          else
+            cargo build --target "${TARGET}" --release "${timings[@]}" \
+              --bin codex \
+              --bin codex-responses-api-proxy
+          fi
+
+      - name: Cargo build (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location "$env:GITHUB_WORKSPACE/build-src/codex-rs"
+
+          cargo build --target $env:TARGET --release --timings `
+            -p codex-cli `
+            -p codex-responses-api-proxy `
+            -p codex-windows-sandbox
+
+      - name: Verify GLIBC requirements (Ubuntu 22.04)
+        if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+
+          limit="2.35"
+
+          require_max_glibc() {
+            local bin="$1"
+            local dynamic_out=""
+
+            dynamic_out="$(readelf -W --dynamic "$bin" 2>&1 || true)"
+            if echo "$dynamic_out" | grep -q "There is no dynamic section"; then
+              echo "${bin} is statically linked; no GLIBC requirement to verify"
+              return 0
+            fi
+
+            local max=""
+            max="$(
+              readelf -W --version-info "$bin" \
+                | grep -oE 'GLIBC_[0-9]+[.][0-9]+([.][0-9]+)?' \
+                | sed 's/^GLIBC_//' \
+                | sort -V \
+                | tail -n 1 \
+                || true
+            )"
+            if [[ -z "${max}" ]]; then
+              echo "Failed to detect GLIBC symbol versions in ${bin}" >&2
+              echo "::group::readelf --dynamic ${bin}" >&2
+              echo "$dynamic_out" >&2
+              echo "::endgroup::" >&2
+              exit 1
+            fi
+            echo "${bin} max GLIBC: ${max}"
+            dpkg --compare-versions "${max}" le "${limit}" \
+              || { echo "❌ ${bin} requires GLIBC_${max} > GLIBC_${limit}" >&2; exit 1; }
+          }
+
+          require_max_glibc "target/${TARGET}/release/codex"
+          require_max_glibc "target/${TARGET}/release/codex-responses-api-proxy"
+          echo "✅ GLIBC requirements <= ${limit}"
+
+      - name: Smoke test Windows artifacts
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-rs"
+          $releaseDir = Join-Path $buildRoot "target/$env:TARGET/release"
+
+          if ($env:TARGET -eq "x86_64-pc-windows-msvc") {
+            & (Join-Path $releaseDir "codex.exe") --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "codex.exe smoke test failed"
+            }
+
+            & (Join-Path $releaseDir "codex-responses-api-proxy.exe") --help | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "codex-responses-api-proxy.exe smoke test failed"
+            }
+          }
+
+          foreach ($binary in @(
+            "codex.exe",
+            "codex-responses-api-proxy.exe",
+            "codex-windows-sandbox-setup.exe",
+            "codex-command-runner.exe"
+          )) {
+            if (-not (Test-Path (Join-Path $releaseDir $binary))) {
+              throw "missing Windows artifact: $binary"
+            }
+          }
+
+      - name: Smoke test macOS artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          "target/${TARGET}/release/codex" --version
+          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+
+      - name: Smoke test Linux artifacts
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          bin_dir="target/${TARGET}/release"
+          for bin in codex codex-responses-api-proxy; do
+            binary_path="${bin_dir}/${bin}"
+            file "${binary_path}"
+            readelf -l "${binary_path}" | grep 'Requesting program interpreter' || true
+            if [[ "${bin}" == "codex-responses-api-proxy" ]]; then
+              "${binary_path}" --help >/dev/null
+            else
+              "${binary_path}" --version
+            fi
+          done
+
+      - name: MacOS code signing (binaries)
+        if: ${{ runner.os == 'macOS' }}
+        uses: ./.github/actions/macos-code-sign
+        with:
+          project-root: build-src/codex-rs
+          target: ${{ env.TARGET }}
+          sign-binaries: "true"
+          sign-dmg: "false"
+          apple-certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-notarization-key-p8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          apple-notarization-key-id: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+
+      - name: Smoke test signed macOS artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          "target/${TARGET}/release/codex" --version
+          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+
+      - name: Build macOS dmg
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+
+          release_dir="target/${TARGET}/release"
+          dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          dmg_path="${release_dir}/codex-${TARGET}.dmg"
+          tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
+          volname="Codex (${TARGET})"
+
+          codex_binary_path="${release_dir}/codex"
+          proxy_binary_path="${release_dir}/codex-responses-api-proxy"
+
+          [[ -f "$codex_binary_path" ]] || {
+            echo "binary $codex_binary_path not found"
+            exit 1
+          }
+          [[ -f "$proxy_binary_path" ]] || {
+            echo "binary $proxy_binary_path not found"
+            exit 1
+          }
+
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          ditto "$codex_binary_path" "${dmg_root}/codex"
+          ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
+
+          rm -f "$dmg_path" "$tmp_dmg_path"
+          for attempt in 1 2 3; do
+            if hdiutil create \
+              -volname "$volname" \
+              -srcfolder "$dmg_root" \
+              -format UDZO \
+              -ov \
+              "$tmp_dmg_path"; then
+              mv "$tmp_dmg_path" "$dmg_path"
+              break
+            fi
+
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "failed to build dmg after ${attempt} attempts"
+              exit 1
+            fi
+
+            echo "hdiutil create failed on attempt ${attempt}; retrying after cleanup"
+            rm -f "$tmp_dmg_path"
+            sleep 5
+          done
+
+          [[ -f "$dmg_path" ]] || {
+            echo "dmg $dmg_path not found after build"
+            exit 1
+          }
+
+      - name: MacOS code signing (dmg)
+        if: ${{ runner.os == 'macOS' }}
+        uses: ./.github/actions/macos-code-sign
+        with:
+          project-root: build-src/codex-rs
+          target: ${{ env.TARGET }}
+          sign-binaries: "false"
+          sign-dmg: "true"
+          apple-certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-notarization-key-p8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          apple-notarization-key-id: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          apple-notarization-issuer-id: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+
+      - name: Verify macOS signed artifacts
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="target/${TARGET}/release"
+          for binary in codex codex-responses-api-proxy; do
+            codesign --verify --strict --verbose=2 "${release_dir}/${binary}"
+          done
+          codesign --verify --verbose=2 "${release_dir}/codex-${TARGET}.dmg"
+          xcrun stapler validate "${release_dir}/codex-${TARGET}.dmg"
+
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+
+          dest="dist/${TARGET}"
+          mkdir -p "$dest"
+          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
+          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/${TARGET}/release/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
+            cp "target/${TARGET}/release/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
+          fi
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            cp "target/${TARGET}/release/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
+          fi
+
+      - name: Compress artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          dest="dist/${TARGET}"
+          for f in "$dest"/*; do
+            base="$(basename "$f")"
+            if [[ "$base" == *.tar.gz || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
+              continue
+            fi
+            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
+            if command -v zstd >/dev/null 2>&1; then
+              zstd -T0 -19 "$dest/$base"
+            fi
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              (cd "$dest" && 7z a "${base}.zip" "$base")
+            fi
+          done
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TARGET }}
+          path: ${{ github.workspace }}/build-src/codex-rs/dist/${{ env.TARGET }}/*
+
+  release:
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-latest
+    # outputs:
+    #   should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
+    #   npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
+    permissions:
+      actions: read
+      contents: write
+    env:
+      SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      SOURCE_REF: ${{ needs.resolve.outputs.source_ref }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
+      TARGETS: ${{ needs.resolve.outputs.targets }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Fetch source metadata
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          auth_args=()
+          if [[ "$SOURCE_URL" == https://github.com/* ]]; then
+            source_token="${CODEBAY_RELEASE_WRITE_TOKEN:-${GITHUB_TOKEN:-}}"
+            if [[ -n "$source_token" ]]; then
+              basic_auth_token="$(printf '%s' "x-access-token:${source_token}" | base64 | tr -d '\n')"
+              auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+            fi
+          else
+            [[ -n "${CNB_TOKEN:-}" ]] || {
+              echo "missing CNB_TOKEN secret"
+              exit 1
+            }
+            basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
+            auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
+          fi
+          rm -rf "$build_root"
+          git init "$build_root"
+          git \
+            -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            "${auth_args[@]}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f | grep -q . || {
+            echo "no downloaded build artifacts found"
+            exit 1
+          }
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          : > "$notes_path"
+          echo "RELEASE_NOTES=$notes_path" >> "$GITHUB_ENV"
+
+      - name: Resolve GitHub release token
+        shell: bash
+        env:
+          RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          GITHUB_ACTIONS_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh_token="${RELEASE_WRITE_TOKEN:-}"
+          if [[ -z "$gh_token" ]]; then
+            gh_token="${GITHUB_ACTIONS_TOKEN:-}"
+          fi
+          [[ -n "$gh_token" ]] || {
+            echo "missing GitHub release token"
+            exit 1
+          }
+          echo "GH_TOKEN=$gh_token" >> "$GITHUB_ENV"
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$RELEASE_REPO" --title "$RELEASE_VERSION" --notes-file "$RELEASE_NOTES"
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --title "$RELEASE_VERSION" --notes-file "$RELEASE_NOTES"
+
+      - name: Upload release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find dist -type f | sort)
+          [[ "${#files[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$RELEASE_REPO" --clobber
+
+  bark-notify:
+    if: ${{ always() }}
+    needs:
+      - resolve
+      - build
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BARK_URL: ${{ secrets.BARK_URL }}
+    steps:
+      - name: Send Bark notification
+        if: ${{ env.BARK_URL != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+        run: |
+          set -euo pipefail
+          status="success"
+          if [[ "$RESOLVE_RESULT" != "success" || "$BUILD_RESULT" != "success" || "$RELEASE_RESULT" != "success" ]]; then
+            status="failed"
+          fi
+
+          title="codex ci ${status}"
+          body="repo=${{ github.repository }} ref=${{ github.ref_name }} run=${{ github.run_number }} resolve=${RESOLVE_RESULT} build=${BUILD_RESULT} release=${RELEASE_RESULT}"
+          curl -fsS -X POST "$BARK_URL" \
+            --data-urlencode "title=${title}" \
+            --data-urlencode "body=${body}" \
+            --data-urlencode "url=${WORKFLOW_URL}" \
+            --data-urlencode "group=github-actions" \
+            --data-urlencode "level=active"
+
+      - name: Skip Bark when secret missing
+        if: ${{ env.BARK_URL == '' }}
+        shell: bash
+        run: echo "BARK_URL secret is empty, skip Bark notification."
+
+  # publish-npm:
+  #   npm 发布相关操作已临时注释，后续恢复时请回滚该注释块。
