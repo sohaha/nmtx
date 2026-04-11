@@ -584,6 +584,13 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
+      - name: Use git CLI for Cargo git dependencies
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
       - name: Setup MSVC toolchain
         if: ${{ runner.os == 'Windows' }}
         uses: ilammy/msvc-dev-cmd@v1
