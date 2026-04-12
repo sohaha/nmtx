@@ -410,7 +410,7 @@ jobs:
 
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
-          bun run --cwd apps/desktop package -- --linux --x64 --publish never
+          bun run --cwd apps/desktop build -- --linux --x64
 
       - name: Build Linux arm64 release
         if: ${{ matrix.target == 'linux-arm64' }}
@@ -420,7 +420,7 @@ jobs:
 
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
           cd "$BUILD_ROOT"
-          bun run --cwd apps/desktop package -- --linux --arm64 --publish never
+          bun run --cwd apps/desktop build -- --linux --arm64
 
       - name: Build macOS arm64 release
         if: ${{ matrix.target == 'mac-arm64' }}
