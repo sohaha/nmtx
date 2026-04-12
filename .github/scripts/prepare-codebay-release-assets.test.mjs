@@ -274,3 +274,44 @@ test("prepareReleaseAssets keeps linux x64 and arm64 installers without affectin
 		rmSync(rootDir, { force: true, recursive: true });
 	}
 });
+
+test("prepareReleaseAssets ignores linux updater metadata", () => {
+	const rootDir = createTempDir();
+	const outputDir = path.join(rootDir, "out");
+
+	try {
+		writeFile(
+			path.join(rootDir, "release-linux-x64", "codebay-1.2.3-x64.AppImage"),
+			"linux-x64-appimage",
+		);
+		writeFile(
+			path.join(rootDir, "release-linux-x64", "latest.yml"),
+			[
+				"version: 1.2.3",
+				"files:",
+				"  - url: codebay-1.2.3-x64.AppImage",
+				"    sha512: linux-appimage",
+				"    size: 555",
+				"path: codebay-1.2.3-x64.AppImage",
+				"sha512: linux-appimage",
+				"releaseDate: '2026-03-24T11:21:00.000Z'",
+				"",
+			].join("\n"),
+		);
+		writeFile(
+			path.join(rootDir, "release-linux-x64", "app-update.yml"),
+			"provider: generic\n",
+		);
+
+		const result = prepareReleaseAssets({
+			artifactsRoot: rootDir,
+			outputDir,
+		});
+
+		assert.ok(result.files.includes("codebay-1.2.3-x64.AppImage"));
+		assert.ok(!result.files.includes("latest.yml"));
+		assert.ok(!result.files.includes("app-update.yml"));
+	} finally {
+		rmSync(rootDir, { force: true, recursive: true });
+	}
+});

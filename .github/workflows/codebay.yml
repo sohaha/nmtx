@@ -614,7 +614,7 @@ jobs:
             "${RUNNER_TEMP}/release-publish" \
             "${RUNNER_TEMP}/existing-release"
 
-      - name: Delete legacy stale assets
+      - name: Delete stale assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
@@ -639,6 +639,36 @@ jobs:
           for asset_name in "${legacy_assets[@]}"; do
             gh release delete-asset "$tag" "$asset_name" --repo "$release_repo" --yes >/dev/null 2>&1 || true
           done
+
+          mapfile -t current_linux_assets < <(
+            find "${RUNNER_TEMP}/release-publish" -maxdepth 1 -type f \
+              \( -name '*.AppImage' -o -name '*.deb' \) \
+              -printf '%f\n' | sort
+          )
+
+          if ((${#current_linux_assets[@]} > 0)); then
+            mapfile -t existing_assets < <(
+              gh release view "$tag" --repo "$release_repo" --json assets --jq '.assets[].name'
+            )
+
+            for asset_name in "${existing_assets[@]}"; do
+              case "$asset_name" in
+                *.AppImage|*.deb)
+                  keep_asset=0
+                  for current_asset in "${current_linux_assets[@]}"; do
+                    if [[ "$asset_name" == "$current_asset" ]]; then
+                      keep_asset=1
+                      break
+                    fi
+                  done
+
+                  if [[ "$keep_asset" -eq 0 ]]; then
+                    gh release delete-asset "$tag" "$asset_name" --repo "$release_repo" --yes >/dev/null 2>&1 || true
+                  fi
+                  ;;
+              esac
+            done
+          fi
 
       - name: Upload to codebay-releases
         shell: bash

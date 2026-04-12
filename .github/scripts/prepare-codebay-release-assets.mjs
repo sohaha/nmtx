@@ -225,6 +225,7 @@ export function prepareReleaseAssets({
 		const targetDirName = path.basename(targetDir);
 		const target = targetDirName.replace(/^release-/, "");
 		const macTargetMatch = target.match(/^mac-(arm64|x64)$/);
+		const winTargetMatch = target === "win-x64";
 
 		for (const filePath of readArtifactFiles(targetDir)) {
 			const fileName = path.basename(filePath);
@@ -239,6 +240,9 @@ export function prepareReleaseAssets({
 			}
 
 			if (fileName === "latest.yml") {
+				if (!winTargetMatch) {
+					continue;
+				}
 				latestManifests.set(target, readFileSync(filePath, "utf8"));
 				continue;
 			}
@@ -252,6 +256,9 @@ export function prepareReleaseAssets({
 			}
 
 			if (fileName === "app-update.yml") {
+				if (!winTargetMatch) {
+					continue;
+				}
 				copySingleton({
 					sourcePath: filePath,
 					destinationPath: path.join(outputDir, fileName),
