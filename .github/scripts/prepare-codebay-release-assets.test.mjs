@@ -213,3 +213,64 @@ test("prepareReleaseAssets fails on conflicting duplicate assets", () => {
 		rmSync(rootDir, { force: true, recursive: true });
 	}
 });
+
+test("prepareReleaseAssets keeps linux x64 and arm64 installers without affecting windows latest manifest", () => {
+	const rootDir = createTempDir();
+	const outputDir = path.join(rootDir, "out");
+
+	try {
+		writeFile(
+			path.join(rootDir, "release-linux-x64", "codebay-1.2.3-x64.AppImage"),
+			"linux-x64-appimage",
+		);
+		writeFile(
+			path.join(rootDir, "release-linux-x64", "codebay-1.2.3-x64.deb"),
+			"linux-x64-deb",
+		);
+		writeFile(
+			path.join(rootDir, "release-linux-arm64", "codebay-1.2.3-arm64.AppImage"),
+			"linux-arm64-appimage",
+		);
+		writeFile(
+			path.join(rootDir, "release-linux-arm64", "codebay-1.2.3-arm64.deb"),
+			"linux-arm64-deb",
+		);
+		writeFile(
+			path.join(rootDir, "release-win-x64", "Codebay-1.2.3-x64.exe"),
+			"win-exe",
+		);
+		writeFile(
+			path.join(rootDir, "release-win-x64", "latest.yml"),
+			[
+				"version: 1.2.3",
+				"files:",
+				"  - url: Codebay-1.2.3-x64.exe",
+				"    sha512: winexe",
+				"    size: 555",
+				"path: Codebay-1.2.3-x64.exe",
+				"sha512: winexe",
+				"releaseDate: '2026-03-24T11:21:00.000Z'",
+				"",
+			].join("\n"),
+		);
+
+		const result = prepareReleaseAssets({
+			artifactsRoot: rootDir,
+			outputDir,
+		});
+
+		assert.ok(result.files.includes("codebay-1.2.3-x64.AppImage"));
+		assert.ok(result.files.includes("codebay-1.2.3-x64.deb"));
+		assert.ok(result.files.includes("codebay-1.2.3-arm64.AppImage"));
+		assert.ok(result.files.includes("codebay-1.2.3-arm64.deb"));
+		assert.ok(result.files.includes("latest.yml"));
+
+		const latestManifest = parseUpdateManifest(
+			readFileSync(path.join(outputDir, "latest.yml"), "utf8"),
+		);
+		assert.equal(latestManifest.path, "Codebay-1.2.3-x64.exe");
+		assert.equal(latestManifest.sha512, "winexe");
+	} finally {
+		rmSync(rootDir, { force: true, recursive: true });
+	}
+});

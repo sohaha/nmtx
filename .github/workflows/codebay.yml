@@ -20,12 +20,14 @@ on:
         type: choice
         options:
           - win-x64
+          - linux-x64
+          - linux-arm64
           - mac-arm64
           - mac-x64
       targets:
         required: false
         type: string
-        description: "Optional comma-separated targets. Supports mac alias and normalizes win-64 to win-x64."
+        description: "Optional comma-separated targets. Supports mac/linux aliases and normalizes win-64 to win-x64."
       channel:
         required: true
         type: choice
@@ -110,13 +112,16 @@ jobs:
               mac)
                 expanded=("mac-arm64" "mac-x64")
                 ;;
+              linux)
+                expanded=("linux-x64" "linux-arm64")
+                ;;
               win-64)
                 expanded=("win-x64")
                 ;;
               all)
                 expanded=("win-x64" "mac-arm64" "mac-x64")
                 ;;
-              win-x64|mac-arm64|mac-x64)
+              win-x64|linux-x64|linux-arm64|mac-arm64|mac-x64)
                 expanded=("$item")
                 ;;
               *)
@@ -139,6 +144,12 @@ jobs:
             case "$normalized_target" in
               win-x64)
                 runner="windows-latest"
+                ;;
+              linux-x64)
+                runner="ubuntu-24.04"
+                ;;
+              linux-arm64)
+                runner="ubuntu-24.04-arm"
                 ;;
               mac-arm64)
                 runner="macos-latest"
@@ -391,6 +402,26 @@ jobs:
           Set-Location $buildRoot
           mise run release-win-x64
 
+      - name: Build Linux x64 release
+        if: ${{ matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun run --cwd apps/desktop package -- --linux --x64 --publish never
+
+      - name: Build Linux arm64 release
+        if: ${{ matrix.target == 'linux-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun run --cwd apps/desktop package -- --linux --arm64 --publish never
+
       - name: Build macOS arm64 release
         if: ${{ matrix.target == 'mac-arm64' }}
         shell: bash
@@ -486,7 +517,12 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path $uploadDir | Out-Null
 
-          $allowedExtensions = @(".blockmap", ".dmg", ".exe", ".yml", ".zip", ".7z")
+          $target = "${{ matrix.target }}"
+          if ($target -like "linux-*") {
+            $allowedExtensions = @(".AppImage", ".deb")
+          } else {
+            $allowedExtensions = @(".blockmap", ".dmg", ".exe", ".yml", ".zip", ".7z")
+          }
           $files = Get-ChildItem -Path $releaseDir -File |
             Where-Object { $allowedExtensions -contains $_.Extension } |
             Select-Object -ExpandProperty FullName
