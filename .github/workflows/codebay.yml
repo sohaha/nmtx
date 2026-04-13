@@ -43,6 +43,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Opt into Node.js 24 for JavaScript-based actions ahead of the runner default
+  # flip in 2026 to avoid surprise breakages.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   resolve:
     runs-on: ubuntu-latest
@@ -59,6 +64,7 @@ jobs:
         id: payload
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
             echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"

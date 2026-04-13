@@ -195,11 +195,35 @@ jobs:
               echo "resolved source from tag $RELEASE_TAG"
             else
               source_sha="$(ls_remote "refs/heads/$SOURCE_REF")"
-              [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
-                echo "failed to resolve source sha for tag $RELEASE_TAG or branch $SOURCE_REF"
-                exit 1
-              }
-              echo "resolved source from branch $SOURCE_REF"
+              if [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "resolved source from branch $SOURCE_REF"
+              else
+                resolved=0
+                default_ref="$(git \
+                  -c credential.helper= \
+                  -c core.askPass= \
+                  "${auth_args[@]}" \
+                  ls-remote --symref "$SOURCE_URL" HEAD \
+                  | awk '/^ref:/ {print $2}' | head -n1)"
+                if [[ -n "$default_ref" ]]; then
+                  source_sha="$(ls_remote "$default_ref")"
+                  if [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                    echo "resolved source from default branch ${default_ref#refs/heads/}"
+                    resolved=1
+                  fi
+                fi
+                if [[ "$resolved" -eq 0 && "$SOURCE_REF" != "main" ]]; then
+                  source_sha="$(ls_remote "refs/heads/main")"
+                  if [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                    echo "resolved source from fallback branch main"
+                    resolved=1
+                  fi
+                fi
+                if [[ "$resolved" -eq 0 ]]; then
+                  echo "failed to resolve source sha for tag $RELEASE_TAG or branch $SOURCE_REF"
+                  exit 1
+                fi
+              fi
             fi
           fi
 
