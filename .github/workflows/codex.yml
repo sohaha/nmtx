@@ -636,7 +636,20 @@ jobs:
       - name: Install musl build tools
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
-        run: bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"
+        run: |
+          set -euo pipefail
+          attempt=1
+          max_attempts=3
+          until bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
+            if (( attempt >= max_attempts )); then
+              echo "install-musl-build-tools failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 15))
+            echo "install-musl-build-tools failed on attempt ${attempt}; retrying in ${sleep_seconds}s" >&2
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
 
       - name: Use Zig linker for musl targets
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
