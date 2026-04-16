@@ -474,30 +474,6 @@ jobs:
           name: remote-shell-helper-zig
           path: ${{ runner.temp }}/remote-shell-helper-zig
 
-      - name: Inject zig remote shell helper resources
-        shell: pwsh
-        run: |
-          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
-          $targetDir = Join-Path $buildRoot "apps/desktop/dist/resources/remote-shell-helper-zig-poc"
-          $artifactDir = Join-Path $env:RUNNER_TEMP "remote-shell-helper-zig"
-
-          if (Test-Path $targetDir) {
-            Remove-Item -Recurse -Force $targetDir
-          }
-
-          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-
-          $sourceRoot = $artifactDir
-          if (-not (Test-Path (Join-Path $sourceRoot "manifest.json"))) {
-            $nestedDir = Join-Path $artifactDir "remote-shell-helper-zig-poc"
-            if (-not (Test-Path (Join-Path $nestedDir "manifest.json"))) {
-              throw "missing zig remote shell helper manifest in downloaded artifact"
-            }
-            $sourceRoot = $nestedDir
-          }
-
-          Get-ChildItem -Force $sourceRoot | Copy-Item -Recurse -Force -Destination $targetDir
-
       - name: Update app version
         shell: pwsh
         env:
@@ -507,13 +483,103 @@ jobs:
           Set-Location $buildRoot
           node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
 
-      - name: Build Windows release
+      - name: Prebuild Windows desktop app
         if: ${{ matrix.target == 'win-x64' }}
         shell: pwsh
         run: |
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
           Set-Location $buildRoot
-          mise run release-win-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=win32-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=win32-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild macOS arm64 desktop app
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=darwin-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=darwin-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild macOS x64 desktop app
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=darwin-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=darwin-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Inject zig remote shell helper resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const buildRoot = path.join(process.env.GITHUB_WORKSPACE, "build-src");
+          const targetDir = path.join(
+            buildRoot,
+            "apps/desktop/dist/resources/remote-shell-helper-zig-poc",
+          );
+          const artifactDir = path.join(
+            process.env.RUNNER_TEMP,
+            "remote-shell-helper-zig",
+          );
+          const sourceRootCandidates = [
+            artifactDir,
+            path.join(artifactDir, "remote-shell-helper-zig-poc"),
+          ];
+          const sourceRoot = sourceRootCandidates.find((candidate) =>
+            fs.existsSync(path.join(candidate, "manifest.json")),
+          );
+
+          if (!sourceRoot) {
+            throw new Error(
+              "missing zig remote shell helper manifest in downloaded artifact",
+            );
+          }
+
+          fs.rmSync(targetDir, { recursive: true, force: true });
+          fs.mkdirSync(targetDir, { recursive: true });
+
+          for (const entry of fs.readdirSync(sourceRoot)) {
+            fs.cpSync(path.join(sourceRoot, entry), path.join(targetDir, entry), {
+              recursive: true,
+              force: true,
+            });
+          }
+
+          const manifestPath = path.join(targetDir, "manifest.json");
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const missingTargets = (manifest.platforms ?? []).filter((target) => {
+            const binaryPath = path.join(
+              targetDir,
+              target,
+              manifest.binaryName,
+            );
+            return !fs.existsSync(binaryPath);
+          });
+
+          if (missingTargets.length > 0) {
+            throw new Error(
+              `zig remote shell helper targets missing after injection: ${missingTargets.join(", ")}`,
+            );
+          }
+
+          console.log(
+            `[zig-helper] injected ${manifest.platforms.length} targets into ${targetDir}`,
+          );
+          console.log(
+            `[zig-helper] targets: ${manifest.platforms.join(", ")}`,
+          );
+          NODE
 
       - name: Build Linux x64 release
         if: ${{ matrix.target == 'linux-x64' }}
@@ -574,7 +640,7 @@ jobs:
           export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
 
           cd "$BUILD_ROOT"
-          mise run release-mac-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --arm64
 
       - name: Build macOS x64 release
         if: ${{ matrix.target == 'mac-x64' }}
@@ -615,7 +681,15 @@ jobs:
           export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
 
           cd "$BUILD_ROOT"
-          mise run release-mac-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --x64
+
+      - name: Build Windows release
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --win --x64
 
       - name: Collect release files
         shell: pwsh
