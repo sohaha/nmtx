@@ -44,8 +44,8 @@ permissions:
   contents: read
 
 env:
-  # Opt into Node.js 24 for JavaScript-based actions ahead of the runner default
-  # flip in 2026 to avoid surprise breakages.
+  # Safety net: force Node.js 24 for any JavaScript-based actions that still
+  # target Node 20 (e.g. transitive actions in composite workflows).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -64,7 +64,6 @@ jobs:
         id: payload
         shell: bash
         run: |
-          set -euo pipefail
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
             echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
@@ -275,7 +274,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout nmtx
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -283,7 +282,7 @@ jobs:
           bun-version: "1.3"
 
       - name: Setup mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
 
       - name: Fetch source at exact SHA
         shell: bash
@@ -335,7 +334,7 @@ jobs:
           bun run remote-shell-helper:zig:build
 
       - name: Upload zig remote shell helper artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: remote-shell-helper-zig
           path: ${{ github.workspace }}/build-src/apps/desktop/dist/resources/remote-shell-helper-zig-poc
@@ -356,7 +355,7 @@ jobs:
 
     steps:
       - name: Checkout nmtx
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -364,7 +363,7 @@ jobs:
           bun-version: "1.3"
 
       - name: Setup mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
 
       - name: Fetch source at exact SHA
         shell: pwsh
@@ -477,7 +476,7 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Download zig remote shell helper artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: remote-shell-helper-zig
           path: ${{ runner.temp }}/remote-shell-helper-zig
@@ -610,26 +609,6 @@ jobs:
             `[zig-helper] targets: ${manifest.platforms.join(", ")}`,
           );
           NODE
-
-      - name: Build Linux x64 release
-        if: ${{ matrix.target == 'linux-x64' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
-          cd "$BUILD_ROOT"
-          bun run --cwd apps/desktop build -- --linux --x64
-
-      - name: Build Linux arm64 release
-        if: ${{ matrix.target == 'linux-arm64' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
-          cd "$BUILD_ROOT"
-          bun run --cwd apps/desktop build -- --linux --arm64
 
       - name: Build macOS arm64 release
         if: ${{ matrix.target == 'mac-arm64' }}
@@ -771,7 +750,7 @@ jobs:
           }
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-${{ matrix.target }}
           path: ${{ runner.temp }}/release-upload/${{ matrix.target }}
@@ -791,7 +770,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout nmtx
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure release exists
         shell: bash
@@ -812,7 +791,7 @@ jobs:
             gh release create "$tag" --repo "$release_repo" --title "$tag" --notes "Automated release for $tag"
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           pattern: release-*
           path: ${{ runner.temp }}/release-artifacts
