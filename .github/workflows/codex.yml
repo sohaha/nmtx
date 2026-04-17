@@ -596,37 +596,128 @@ jobs:
             echo "update_action source not found; skip patch"
             exit 0
           fi
-          python3 - <<'PY'
-          import os
-          import pathlib
+          cat > "$target_file" <<'EOF'
+          /// Update action the CLI should perform after the TUI exits.
+          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          pub enum UpdateAction {
+              /// Update via `npm install -g @sohaha/zcodex@latest`.
+              NpmGlobalLatest,
+              /// Update via standalone Windows PowerShell installer.
+              StandaloneWindows,
+              /// Update via `bun install -g @sohaha/zcodex@latest`.
+              BunGlobalLatest,
+              /// Update via `brew upgrade codex`.
+              BrewUpgrade,
+          }
 
-          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "tui" / "src" / "update_action.rs"
-          text = path.read_text(encoding="utf-8")
+          impl UpdateAction {
+              /// Returns the list of command-line arguments for invoking the update.
+              pub fn command_args(self) -> (&'static str, &'static [&'static str]) {
+                  match self {
+                      UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@sohaha/zcodex"]),
+                      UpdateAction::StandaloneWindows => ("powershell", &["-NoProfile", "-Command", "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-Expression ((Invoke-WebRequest -UseBasicParsing 'https://cnb.cool/zcodex_install.ps1').Content) }"]),
+                      UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@sohaha/zcodex"]),
+                      UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
+                  }
+              }
 
-          if "StandaloneWindows" in text:
-              print("StandaloneWindows variant already present")
-              raise SystemExit(0)
+              /// Returns string representation of the command-line arguments for invoking the update.
+              pub fn command_str(self) -> String {
+                  let (command, args) = self.command_args();
+                  shlex::try_join(std::iter::once(command).chain(args.iter().copied()))
+                      .unwrap_or_else(|_| format!("{command} {}", args.join(" ")))
+              }
+          }
 
-          variant_anchor = "    /// Update via `bun install -g @sohaha/zcodex@latest`.\n"
-          variant_insert = (
-              "    /// Update via standalone Windows PowerShell installer.\n"
-              "    StandaloneWindows,\n"
-          )
-          if variant_anchor not in text:
-              raise SystemExit("failed to find enum insertion anchor in update_action.rs")
-          updated = text.replace(variant_anchor, variant_insert + variant_anchor, 1)
+          #[cfg(not(debug_assertions))]
+          pub(crate) fn get_update_action() -> Option<UpdateAction> {
+              let exe = std::env::current_exe().unwrap_or_default();
+              let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
+              let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
 
-          match_anchor = "            UpdateAction::NpmGlobalLatest => (\"npm\", &[\"install\", \"-g\", \"@sohaha/zcodex\"]),\n"
-          match_insert = (
-              "            UpdateAction::StandaloneWindows => (\"powershell\", &[\"-NoProfile\", \"-Command\", \"& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-Expression ((Invoke-WebRequest -UseBasicParsing 'https://cnb.cool/zcodex_install.ps1').Content) }\"]),\n"
-          )
-          if match_anchor not in updated:
-              raise SystemExit("failed to find match insertion anchor in update_action.rs")
-          updated = updated.replace(match_anchor, match_anchor + match_insert, 1)
+              detect_update_action(
+                  cfg!(target_os = "macos"),
+                  &exe,
+                  managed_by_npm,
+                  managed_by_bun,
+              )
+          }
 
-          path.write_text(updated, encoding="utf-8")
-          print("patched missing StandaloneWindows update action")
-          PY
+          #[cfg(any(not(debug_assertions), test))]
+          fn detect_update_action(
+              is_macos: bool,
+              current_exe: &std::path::Path,
+              managed_by_npm: bool,
+              managed_by_bun: bool,
+          ) -> Option<UpdateAction> {
+              if managed_by_npm {
+                  Some(UpdateAction::NpmGlobalLatest)
+              } else if managed_by_bun {
+                  Some(UpdateAction::BunGlobalLatest)
+              } else if is_macos
+                  && (current_exe.starts_with("/opt/homebrew") || current_exe.starts_with("/usr/local"))
+              {
+                  Some(UpdateAction::BrewUpgrade)
+              } else {
+                  None
+              }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn detects_update_action_without_env_mutation() {
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ false,
+                          std::path::Path::new("/any/path"),
+                          /*managed_by_npm*/ false,
+                          /*managed_by_bun*/ false
+                      ),
+                      None
+                  );
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ false,
+                          std::path::Path::new("/any/path"),
+                          /*managed_by_npm*/ true,
+                          /*managed_by_bun*/ false
+                      ),
+                      Some(UpdateAction::NpmGlobalLatest)
+                  );
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ false,
+                          std::path::Path::new("/any/path"),
+                          /*managed_by_npm*/ false,
+                          /*managed_by_bun*/ true
+                      ),
+                      Some(UpdateAction::BunGlobalLatest)
+                  );
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ true,
+                          std::path::Path::new("/opt/homebrew/bin/codex"),
+                          /*managed_by_npm*/ false,
+                          /*managed_by_bun*/ false
+                      ),
+                      Some(UpdateAction::BrewUpgrade)
+                  );
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ true,
+                          std::path::Path::new("/usr/local/bin/codex"),
+                          /*managed_by_npm*/ false,
+                          /*managed_by_bun*/ false
+                      ),
+                      Some(UpdateAction::BrewUpgrade)
+                  );
+              }
+          }
+          EOF
+          echo "rewrote update_action.rs with Windows-compatible fixed content"
 
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
