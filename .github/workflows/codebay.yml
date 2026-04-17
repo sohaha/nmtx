@@ -414,7 +414,7 @@ jobs:
           if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
 
       - name: Patch legacy mac signing script compatibility
-        if: ${{ matrix.target != 'win-x64' }}
+        if: ${{ matrix.target != 'win-x64' && !startsWith(matrix.target, 'linux-') }}
         shell: bash
         env:
           SIGN_SCRIPT: ${{ github.workspace }}/build-src/apps/desktop/scripts/macos-signing-local.sh
@@ -461,7 +461,15 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Install dependencies on macOS
-        if: ${{ matrix.target != 'win-x64' }}
+        if: ${{ startsWith(matrix.target, 'mac-') }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun install --frozen-lockfile
+
+      - name: Install dependencies on Linux
+        if: ${{ startsWith(matrix.target, 'linux-') }}
         shell: bash
         run: |
           BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
@@ -513,6 +521,28 @@ jobs:
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=darwin-x64
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=darwin-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild Linux x64 desktop app
+        if: ${{ matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=linux-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=linux-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild Linux arm64 desktop app
+        if: ${{ matrix.target == 'linux-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=linux-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=linux-arm64
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
 
       - name: Inject zig remote shell helper resources
@@ -682,6 +712,24 @@ jobs:
 
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --x64
+
+      - name: Build Linux x64 release
+        if: ${{ matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --linux --x64
+
+      - name: Build Linux arm64 release
+        if: ${{ matrix.target == 'linux-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --linux --arm64
 
       - name: Build Windows release
         if: ${{ matrix.target == 'win-x64' }}
