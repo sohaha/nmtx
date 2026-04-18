@@ -22,8 +22,8 @@ name: Build Codex Release
       targets:
         required: false
         type: string
-        default: all
-        description: Optional comma-separated targets. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
+        default: x86_64-unknown-linux-gnu
+        description: Optional comma-separated targets. Defaults to the fastest smoke target for manual tests. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
       release_repo:
         required: true
         type: string
