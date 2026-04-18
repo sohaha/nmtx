@@ -31,8 +31,8 @@ name: Build Codex Release
       publish_mode:
         required: false
         type: string
-        default: full
-        description: Release mode. Use full for build+release, or npm-only to only publish npm from an existing GitHub release.
+        default: build-only
+        description: Release mode. Use build-only for fast smoke tests, full for build+release, or npm-only to only publish npm from an existing GitHub release.
 
 permissions:
   contents: read
@@ -119,7 +119,7 @@ jobs:
           [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zcodex" ]] || exit 1
           [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
           case "${{ steps.payload.outputs.publish_mode }}" in
-            full|npm-only)
+            build-only|full|npm-only)
               ;;
             *)
               echo "unsupported publish_mode: ${{ steps.payload.outputs.publish_mode }}"
@@ -127,21 +127,28 @@ jobs:
               ;;
           esac
 
-      - name: Validate required secrets
+      - name: Validate build secrets
         if: ${{ steps.payload.outputs.publish_mode != 'npm-only' }}
         shell: bash
         env:
-          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CNB_TOKEN:-}" ]]; then
+            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CNB_TOKEN"
+            echo "路径: Settings -> Secrets and variables -> Actions"
+            exit 1
+          fi
+
+      - name: Validate release secrets
+        if: ${{ steps.payload.outputs.publish_mode == 'full' || steps.payload.outputs.publish_mode == 'npm-only' }}
+        shell: bash
+        env:
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${CODEBAY_RELEASE_WRITE_TOKEN:-}" ]]; then
             echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CODEBAY_RELEASE_WRITE_TOKEN"
-            echo "路径: Settings -> Secrets and variables -> Actions"
-            exit 1
-          fi
-          if [[ -z "${CNB_TOKEN:-}" ]]; then
-            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置 GitHub Actions secret: CNB_TOKEN"
             echo "路径: Settings -> Secrets and variables -> Actions"
             exit 1
           fi
@@ -1341,7 +1348,7 @@ jobs:
           path: ${{ github.workspace }}/build-src/codex-rs/dist/${{ env.TARGET }}/*
 
   release:
-    if: ${{ needs.resolve.outputs.publish_mode != 'npm-only' && needs.build.result == 'success' }}
+    if: ${{ needs.resolve.outputs.publish_mode == 'full' && needs.build.result == 'success' }}
     needs:
       - resolve
       - build
@@ -1636,6 +1643,10 @@ jobs:
           fi
           if [[ "$PUBLISH_MODE" == "npm-only" ]]; then
             if [[ "$PUBLISH_NPM_RESULT" != "success" ]]; then
+              status="failed"
+            fi
+          elif [[ "$PUBLISH_MODE" == "build-only" ]]; then
+            if [[ "$BUILD_RESULT" != "success" ]]; then
               status="failed"
             fi
           else
