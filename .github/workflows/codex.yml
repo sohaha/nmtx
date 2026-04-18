@@ -1422,7 +1422,7 @@ jobs:
         uses: pnpm/action-setup@v5
         with:
           run_install: false
-          version: 8
+          package_json_file: build-src/package.json
 
       - name: Setup Node.js for npm packaging
         if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
