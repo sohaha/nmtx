@@ -666,6 +666,8 @@ jobs:
             exit 1
           }
           codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" --key "$notary_key_path" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
 
       - name: Verify macOS arm64 signatures
         if: ${{ matrix.target == 'mac-arm64' }}
@@ -755,6 +757,8 @@ jobs:
             exit 1
           }
           codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" --key "$notary_key_path" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
 
       - name: Verify macOS x64 signatures
         if: ${{ matrix.target == 'mac-x64' }}
