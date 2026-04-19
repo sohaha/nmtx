@@ -1595,7 +1595,7 @@ jobs:
                 ;;
             esac
 
-            publish_cmd=(npm publish "${tarball}")
+            publish_cmd=(npm publish "${tarball}" --access public)
             if [[ -n "${tag}" ]]; then
               publish_cmd+=(--tag "${tag}")
             fi
