@@ -696,7 +696,10 @@ jobs:
           ! grep -q "Signature=adhoc" /tmp/codebay-arm64-app-sign.txt
 
           spctl -a -vvv "$APP_PATH"
-          spctl -a -vvv -t open "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          if ! spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH"; then
+            spctl -a -vvv -t install --context context:primary-signature "$DMG_PATH"
+          fi
 
       - name: Build macOS x64 release
         if: ${{ matrix.target == 'mac-x64' }}
@@ -799,7 +802,10 @@ jobs:
           ! grep -q "Signature=adhoc" /tmp/codebay-x64-app-sign.txt
 
           spctl -a -vvv "$APP_PATH"
-          spctl -a -vvv -t open "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          if ! spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH"; then
+            spctl -a -vvv -t install --context context:primary-signature "$DMG_PATH"
+          fi
 
       - name: Build Linux x64 release
         if: ${{ matrix.target == 'linux-x64' }}
