@@ -639,7 +639,16 @@ jobs:
           security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
 
+          CSC_NAME="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"Developer ID Application: \(.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$CSC_NAME" ]]; then
+            echo "failed to resolve Developer ID Application identity from $keychain_path"
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
           export LOGIN_KEYCHAIN="$keychain_path"
+          export CSC_NAME
+          export CSC_KEYCHAIN="$keychain_path"
           export APPLE_CERTIFICATE_P12="$cert_path"
           export MAC_CERTIFICATE="$cert_path"
           export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
@@ -647,6 +656,35 @@ jobs:
 
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --arm64
+
+      - name: Verify macOS arm64 signatures
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          APP_PATH="$(find "$BUILD_ROOT/apps/desktop/release/mac-arm64" -maxdepth 1 -name 'Codebay.app' -print -quit)"
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name 'Codebay-*.dmg' | grep 'arm64' | head -n 1)"
+
+          [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || {
+            echo "missing signed app bundle in release/mac-arm64"
+            exit 1
+          }
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing arm64 dmg in release output"
+            exit 1
+          }
+
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 | tee /tmp/codebay-arm64-app-sign.txt
+          codesign -dv --verbose=4 "$DMG_PATH" 2>&1 | tee /tmp/codebay-arm64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/codebay-arm64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/codebay-arm64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/codebay-arm64-app-sign.txt
+
+          spctl -a -vvv "$APP_PATH"
+          spctl -a -vvv "$DMG_PATH"
 
       - name: Build macOS x64 release
         if: ${{ matrix.target == 'mac-x64' }}
@@ -680,7 +718,16 @@ jobs:
           security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
 
+          CSC_NAME="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"Developer ID Application: \(.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$CSC_NAME" ]]; then
+            echo "failed to resolve Developer ID Application identity from $keychain_path"
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
           export LOGIN_KEYCHAIN="$keychain_path"
+          export CSC_NAME
+          export CSC_KEYCHAIN="$keychain_path"
           export APPLE_CERTIFICATE_P12="$cert_path"
           export MAC_CERTIFICATE="$cert_path"
           export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
@@ -688,6 +735,35 @@ jobs:
 
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --x64
+
+      - name: Verify macOS x64 signatures
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          APP_PATH="$(find "$BUILD_ROOT/apps/desktop/release/mac" -maxdepth 1 -name 'Codebay.app' -print -quit)"
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name 'Codebay-*.dmg' | grep -v 'arm64' | head -n 1)"
+
+          [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || {
+            echo "missing signed app bundle in release/mac"
+            exit 1
+          }
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing x64 dmg in release output"
+            exit 1
+          }
+
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 | tee /tmp/codebay-x64-app-sign.txt
+          codesign -dv --verbose=4 "$DMG_PATH" 2>&1 | tee /tmp/codebay-x64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/codebay-x64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/codebay-x64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/codebay-x64-app-sign.txt
+
+          spctl -a -vvv "$APP_PATH"
+          spctl -a -vvv "$DMG_PATH"
 
       - name: Build Linux x64 release
         if: ${{ matrix.target == 'linux-x64' }}
