@@ -653,9 +653,19 @@ jobs:
           export MAC_CERTIFICATE="$cert_path"
           export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
           export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+          export APPLE_API_KEY="$notary_key_path"
+          export APPLE_API_KEY_ID="$APPLE_NOTARIZATION_KEY_ID"
+          export APPLE_API_ISSUER="$APPLE_NOTARIZATION_ISSUER_ID"
 
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --arm64
+
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name "Codebay-*.dmg" | grep "arm64" | head -n 1)"
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing arm64 dmg in release output"
+            exit 1
+          }
+          codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
 
       - name: Verify macOS arm64 signatures
         if: ${{ matrix.target == 'mac-arm64' }}
@@ -732,9 +742,19 @@ jobs:
           export MAC_CERTIFICATE="$cert_path"
           export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
           export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+          export APPLE_API_KEY="$notary_key_path"
+          export APPLE_API_KEY_ID="$APPLE_NOTARIZATION_KEY_ID"
+          export APPLE_API_ISSUER="$APPLE_NOTARIZATION_ISSUER_ID"
 
           cd "$BUILD_ROOT"
           bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --x64
+
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name "Codebay-*.dmg" | grep -Ev "arm64|universal" | head -n 1)"
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing x64 dmg in release output"
+            exit 1
+          }
+          codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
 
       - name: Verify macOS x64 signatures
         if: ${{ matrix.target == 'mac-x64' }}
