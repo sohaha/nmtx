@@ -183,14 +183,6 @@ jobs:
             echo "npm_tag=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Validate manual publish mode for npm-publishable versions
-        if: ${{ github.event_name == 'workflow_dispatch' && steps.npm_publish_settings.outputs.should_publish == 'true' && steps.payload.outputs.publish_mode == 'build-only' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "version ${{ steps.payload.outputs.version }} is eligible for npm publishing, but publish_mode=build-only only runs the build job."
-          echo "Re-run this workflow with publish_mode=full to create the GitHub release and publish npm packages."
-          exit 1
 
       - name: Validate npm-only publishability
         if: ${{ steps.payload.outputs.publish_mode == 'npm-only' && steps.npm_publish_settings.outputs.should_publish != 'true' }}
