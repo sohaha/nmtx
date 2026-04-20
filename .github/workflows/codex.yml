@@ -1470,6 +1470,44 @@ jobs:
             --package codex \
             --output-dir "${GITHUB_WORKSPACE}/dist/npm"
 
+      - name: Normalize npm package repository metadata
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
+        shell: bash
+        env:
+          PROVENANCE_REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(dist/npm/*.tgz)
+          [[ ${#tarballs[@]} -gt 0 ]] || {
+            echo "no npm tarballs found to normalize"
+            exit 1
+          }
+
+          for tarball in "${tarballs[@]}"; do
+            workdir="$(mktemp -d)"
+
+            tar -xzf "$tarball" -C "$workdir"
+
+            PACKAGE_JSON="$workdir/package/package.json" node <<'NODE'
+            const fs = require("fs");
+
+            const packageJsonPath = process.env.PACKAGE_JSON;
+            const repositoryUrl = process.env.PROVENANCE_REPOSITORY_URL;
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+
+            packageJson.repository = {
+              type: "git",
+              url: repositoryUrl,
+            };
+
+            fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+            NODE
+
+            tar -czf "$tarball" -C "$workdir" package
+            rm -rf "$workdir"
+          done
+
       - name: Resolve GitHub release token
         shell: bash
         env:
