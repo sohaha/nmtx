@@ -1464,11 +1464,23 @@ jobs:
           set -euo pipefail
           mkdir -p "${GITHUB_WORKSPACE}/dist/npm"
           cd "${GITHUB_WORKSPACE}/build-src"
-          python3 ./scripts/stage_npm_packages.py \
+          attempt=1
+          max_attempts=3
+          until python3 ./scripts/stage_npm_packages.py \
             --workflow-url "$WORKFLOW_URL" \
             --release-version "$RELEASE_VERSION" \
             --package codex \
-            --output-dir "${GITHUB_WORKSPACE}/dist/npm"
+            --output-dir "${GITHUB_WORKSPACE}/dist/npm"; do
+            if (( attempt >= max_attempts )); then
+              echo "stage_npm_packages.py failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            rm -rf "${GITHUB_WORKSPACE}/dist/npm"/*
+            sleep_seconds=$((attempt * 15))
+            echo "stage_npm_packages.py failed on attempt ${attempt}; retrying in ${sleep_seconds}s" >&2
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
 
       - name: Normalize npm package repository metadata
         if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
