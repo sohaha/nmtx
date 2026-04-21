@@ -1501,20 +1501,14 @@ jobs:
 
             tar -xzf "$tarball" -C "$workdir"
 
-            PACKAGE_JSON="$workdir/package/package.json" node <<'NODE'
-            const fs = require("fs");
-
-            const packageJsonPath = process.env.PACKAGE_JSON;
-            const repositoryUrl = process.env.PROVENANCE_REPOSITORY_URL;
-            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-
-            packageJson.repository = {
-              type: "git",
-              url: repositoryUrl,
-            };
-
-            fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
-            NODE
+            PACKAGE_JSON="$workdir/package/package.json" node -e '
+              const fs = require("fs");
+              const packageJsonPath = process.env.PACKAGE_JSON;
+              const repositoryUrl = process.env.PROVENANCE_REPOSITORY_URL;
+              const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+              packageJson.repository = { type: "git", url: repositoryUrl };
+              fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
+            '
 
             tar -czf "$tarball" -C "$workdir" package
             rm -rf "$workdir"
