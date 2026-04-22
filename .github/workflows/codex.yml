@@ -37,6 +37,10 @@ name: Build Codex Release
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.publish_mode || github.event.client_payload.publish_mode || 'build-only' }}-${{ inputs.source_ref || github.event.client_payload.source_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
 env:
   # Opt into Node.js 24 for JavaScript-based actions ahead of the runner default
   # flip in 2026 to avoid surprise breakages.
@@ -311,7 +315,7 @@ jobs:
                 )
                 ;;
               mac)
-                expanded=("aarch64-apple-darwin|macos-15" "x86_64-apple-darwin|macos-15")
+                expanded=("aarch64-apple-darwin|macos-15" "x86_64-apple-darwin|macos-15-intel")
                 ;;
               linux)
                 expanded=(
@@ -338,7 +342,7 @@ jobs:
                   "x86_64-pc-windows-msvc|windows-latest"
                   "aarch64-pc-windows-msvc|windows-latest"
                   "aarch64-apple-darwin|macos-15"
-                  "x86_64-apple-darwin|macos-15"
+                  "x86_64-apple-darwin|macos-15-intel"
                   "x86_64-unknown-linux-musl|ubuntu-22.04"
                   "aarch64-unknown-linux-musl|ubuntu-24.04-arm"
                   "x86_64-unknown-linux-gnu|ubuntu-22.04"
@@ -355,7 +359,7 @@ jobs:
                 expanded=("aarch64-apple-darwin|macos-15")
                 ;;
               x86_64-apple-darwin)
-                expanded=("x86_64-apple-darwin|macos-15")
+                expanded=("x86_64-apple-darwin|macos-15-intel")
                 ;;
               x86_64-unknown-linux-gnu)
                 expanded=("x86_64-unknown-linux-gnu|ubuntu-22.04")
