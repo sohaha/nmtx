@@ -948,6 +948,15 @@ jobs:
           echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
           echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
 
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+          workspaces: |
+            ${{ github.workspace }}/build-src/codex-rs -> target
+          cache-directories: |
+            ${{ github.workspace }}/.cargo-home
+
       - name: Configure musl rusty_v8 artifact overrides
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -1599,6 +1608,51 @@ jobs:
               --repo "$RELEASE_REPO" \
               --pattern "$pattern" \
               --dir dist/npm
+          done
+
+      - name: Validate npm provenance metadata
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(dist/npm/*-"${RELEASE_VERSION}".tgz)
+          if [[ ${#tarballs[@]} -eq 0 ]]; then
+            echo "No npm tarballs found in dist/npm for version ${RELEASE_VERSION}"
+            exit 1
+          fi
+
+          for tarball in "${tarballs[@]}"; do
+            repository_url="$(
+              tar -xOf "${tarball}" package/package.json \
+                | node -e '
+                    let input = "";
+                    process.stdin.on("data", (chunk) => {
+                      input += chunk;
+                    });
+                    process.stdin.on("end", () => {
+                      const pkg = JSON.parse(input);
+                      const repository = pkg.repository;
+                      const url =
+                        typeof repository === "string"
+                          ? repository
+                          : repository?.url ?? "";
+                      process.stdout.write(url);
+                    });
+                  '
+            )"
+
+            normalized_repository="${repository_url#git+}"
+            normalized_repository="${normalized_repository%.git}"
+            normalized_repository="${normalized_repository%/}"
+
+            if [[ "${normalized_repository}" != "${EXPECTED_REPOSITORY}" ]]; then
+              echo "npm provenance metadata mismatch in $(basename "${tarball}")"
+              echo "  package.json repository.url: ${repository_url:-<missing>}"
+              echo "  expected: ${EXPECTED_REPOSITORY}"
+              exit 1
+            fi
           done
 
       - name: Publish to npm
