@@ -1501,7 +1501,7 @@ jobs:
           until python3 ./scripts/stage_npm_packages.py \
             --workflow-url "$WORKFLOW_URL" \
             --release-version "$RELEASE_VERSION" \
-            --package zcodex \
+            --package codex \
             --output-dir "${GITHUB_WORKSPACE}/dist/npm"; do
             if (( attempt >= max_attempts )); then
               echo "stage_npm_packages.py failed after ${attempt} attempts" >&2
