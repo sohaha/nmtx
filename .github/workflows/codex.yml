@@ -480,14 +480,27 @@ jobs:
             basic_auth_token="$(printf '%s' "cnb:${CNB_TOKEN}" | base64 | tr -d '\n')"
             auth_args=(-c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}")
           fi
-          rm -rf "$build_root"
-          git init "$build_root"
-          git \
-            -C "$build_root" \
-            -c credential.helper= \
-            -c core.askPass= \
-            "${auth_args[@]}" \
-            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          attempt=1
+          max_attempts=3
+          until {
+            rm -rf "$build_root"
+            git init "$build_root"
+            git \
+              -C "$build_root" \
+              -c credential.helper= \
+              -c core.askPass= \
+              "${auth_args[@]}" \
+              fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          }; do
+            if (( attempt >= max_attempts )); then
+              echo "failed to fetch source after ${attempt} attempts" >&2
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 15))
+            echo "source fetch failed on attempt ${attempt}; retrying in ${sleep_seconds}s" >&2
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
           git -C "$build_root" checkout --force FETCH_HEAD
 
       - name: Verify source layout
