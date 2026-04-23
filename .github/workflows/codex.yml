@@ -1065,6 +1065,20 @@ jobs:
           echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "$GITHUB_ENV"
 
+      - name: Clear cached rusty_v8 extracted artifacts
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src/codex-rs/target/${TARGET}/release/build"
+          if [[ ! -d "${build_root}" ]]; then
+            exit 0
+          fi
+          find "${build_root}" \
+            -path '*/out/gn_out/obj/librusty_v8.a' -delete
+          find "${build_root}" \
+            -path '*/out/gn_out/obj/librusty_v8.sum' -delete
+
       - name: Reduce Rust build parallelism on aarch64 Linux
         if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
         shell: bash
