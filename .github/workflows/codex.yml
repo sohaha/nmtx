@@ -1115,9 +1115,9 @@ jobs:
           # Cross-compiling to aarch64-windows on x86_64-windows runner with
           # aggressive LTO settings causes OOM. Disable LTO and increase
           # codegen-units to reduce peak memory.
-          $env:CARGO_PROFILE_RELEASE_LTO = 'false'
-          $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '16'
-          $env:CARGO_BUILD_JOBS = '1'
+          "CARGO_PROFILE_RELEASE_LTO=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Disabled LTO and increased codegen-units for aarch64 Windows cross-compile"
 
       - name: Enable swap on aarch64 Linux runner
