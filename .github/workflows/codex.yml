@@ -665,6 +665,33 @@ jobs:
               print("arg0 filename loop already patched")
           PY
 
+      - name: Patch Windows app roots local app data reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_file="${GITHUB_WORKSPACE}/build-src/codex-rs/cli/src/desktop_app/windows.rs"
+          if [[ ! -f "$target_file" ]]; then
+            echo "windows desktop app source not found; skip patch"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "cli" / "src" / "desktop_app" / "windows.rs"
+          text = path.read_text(encoding="utf-8")
+          updated = text.replace(
+              "roots.push(PathBuf::from(local_app_data).join(\"Programs\"));",
+              "roots.push(PathBuf::from(local_app_data.clone()).join(\"Programs\"));",
+              1,
+          )
+          if updated != text:
+              path.write_text(updated, encoding="utf-8")
+              print("patched windows app roots LOCALAPPDATA reuse")
+          else:
+              print("windows app roots LOCALAPPDATA reuse already patched")
+          PY
+
       - name: Patch missing StandaloneWindows update action
         shell: bash
         run: |
