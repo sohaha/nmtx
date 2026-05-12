@@ -442,7 +442,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
@@ -1164,6 +1164,18 @@ jobs:
           "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Disabled LTO and increased codegen-units for aarch64 Windows cross-compile"
+
+      - name: Reduce Rust build memory on aarch64 macOS
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # aarch64 macOS has no cache and LTO linking takes extremely long.
+          # Disable LTO to cut link time; the first build also populates
+          # the cache for subsequent runs.
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
 
       - name: Enable swap on Linux runner
         if: ${{ runner.os == 'Linux' }}
