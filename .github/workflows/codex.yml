@@ -1211,6 +1211,9 @@ jobs:
             # Link one binary at a time to reduce peak memory pressure.
             cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex
             cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+            if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+              cargo build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
+            fi
           else
             cargo build --target "${TARGET}" --release "${timings[@]}" \
               --bin codex \
@@ -1329,6 +1332,12 @@ jobs:
               "${binary_path}" --version
             fi
           done
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            [[ -x "${bin_dir}/bwrap" ]] || {
+              echo "missing Linux artifact: bwrap"
+              exit 1
+            }
+          fi
 
       - name: MacOS code signing (binaries)
         if: ${{ runner.os == 'macOS' }}
@@ -1451,6 +1460,9 @@ jobs:
           mkdir -p "$dest"
           cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
           cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            cp "target/${TARGET}/release/bwrap" "$dest/bwrap-${TARGET}"
+          fi
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "target/${TARGET}/release/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
             cp "target/${TARGET}/release/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
