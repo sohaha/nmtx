@@ -912,32 +912,6 @@ jobs:
             attempt=$((attempt + 1))
           done
 
-      - name: Use Zig linker for musl targets
-        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          linker="${CC:-}"
-          if [[ -z "$linker" ]]; then
-            case "${TARGET}" in
-              x86_64-unknown-linux-musl)
-                linker="$(command -v x86_64-linux-musl-gcc || true)"
-                ;;
-              aarch64-unknown-linux-musl)
-                linker="$(command -v aarch64-linux-musl-gcc || true)"
-                ;;
-              *)
-                linker=""
-                ;;
-            esac
-          fi
-          if [[ -z "$linker" ]]; then
-            echo "missing musl linker for ${TARGET}" >&2
-            exit 1
-          fi
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
-
       - name: Configure rustc UBSan wrapper
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -1201,6 +1175,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          cargo_bin="$(rustup which cargo 2>/dev/null || command -v cargo)"
           timings=(--timings)
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
@@ -1209,13 +1184,13 @@ jobs:
           fi
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Link one binary at a time to reduce peak memory pressure.
-            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex
-            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
-              cargo build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
           else
-            cargo build --target "${TARGET}" --release "${timings[@]}" \
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
               --bin codex \
               --bin codex-responses-api-proxy
           fi
