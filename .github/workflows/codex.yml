@@ -989,6 +989,29 @@ jobs:
           echo "${cargo_home}/bin" >> "$GITHUB_PATH"
           : > "${cargo_home}/config.toml"
 
+      - name: Disable source linker wrapper for musl
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_path="${GITHUB_WORKSPACE}/build-src/codex-rs/.cargo/config.toml"
+          [[ -f "${config_path}" ]] || {
+            echo "missing Cargo config: ${config_path}" >&2
+            exit 1
+          }
+
+          tmp="$(mktemp)"
+          perl -0pe '
+            s/^[[:space:]]*linker = "scripts\/linker-wrapper[.]sh"\r?\n//mg;
+            s/^[[:space:]]*rustc-wrapper = "scripts\/rustc-wrapper[.]sh"\r?\n//mg;
+          ' "${config_path}" > "${tmp}"
+          if cmp -s "${config_path}" "${tmp}"; then
+            echo "No source wrapper entries found in ${config_path}; skipping"
+            rm -f "${tmp}"
+          else
+            mv "${tmp}" "${config_path}"
+          fi
+
       - name: Install Zig
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         uses: mlugg/setup-zig@v2
