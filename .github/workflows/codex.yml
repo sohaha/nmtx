@@ -989,34 +989,11 @@ jobs:
           echo "${cargo_home}/bin" >> "$GITHUB_PATH"
           : > "${cargo_home}/config.toml"
 
-      - name: Disable source linker wrapper for musl
-        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          config_path="${GITHUB_WORKSPACE}/build-src/codex-rs/.cargo/config.toml"
-          [[ -f "${config_path}" ]] || {
-            echo "missing Cargo config: ${config_path}" >&2
-            exit 1
-          }
-
-          tmp="$(mktemp)"
-          perl -0pe '
-            s/^[[:space:]]*linker = "scripts\/linker-wrapper[.]sh"\r?\n//mg;
-            s/^[[:space:]]*rustc-wrapper = "scripts\/rustc-wrapper[.]sh"\r?\n//mg;
-          ' "${config_path}" > "${tmp}"
-          if cmp -s "${config_path}" "${tmp}"; then
-            echo "No source wrapper entries found in ${config_path}; skipping"
-            rm -f "${tmp}"
-          else
-            mv "${tmp}" "${config_path}"
-          fi
-
       - name: Install Zig
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.13.0
+          version: 0.14.0
 
       - name: Install musl build tools
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
@@ -1025,15 +1002,7 @@ jobs:
           set -euo pipefail
           attempt=1
           max_attempts=3
-          path_without_zig=""
-          IFS=: read -r -a path_entries <<< "${PATH}"
-          for path_entry in "${path_entries[@]}"; do
-            if [[ -x "${path_entry}/zig" ]]; then
-              continue
-            fi
-            path_without_zig+="${path_without_zig:+:}${path_entry}"
-          done
-          until PATH="${path_without_zig}" bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
+          until bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
             if (( attempt >= max_attempts )); then
               echo "install-musl-build-tools failed after ${attempt} attempts" >&2
               exit 1
@@ -1058,8 +1027,7 @@ jobs:
           for name in ("zigcc", "zigcxx"):
               path = tool_root / name
               if not path.exists():
-                  print(f"generated Zig wrapper not present, using non-Zig musl compiler: {path}")
-                  continue
+                  raise SystemExit(f"missing generated Zig wrapper: {path}")
               content = path.read_text(encoding="utf-8")
               content = content.replace(
                   "set -euo pipefail\n\n",
@@ -1095,6 +1063,32 @@ jobs:
               path.write_text(content, encoding="utf-8")
           PY
 
+      - name: Use Zig linker for musl targets
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          linker="${CC:-}"
+          if [[ -z "$linker" ]]; then
+            case "${TARGET}" in
+              x86_64-unknown-linux-musl)
+                linker="$(command -v x86_64-linux-musl-gcc || true)"
+                ;;
+              aarch64-unknown-linux-musl)
+                linker="$(command -v aarch64-linux-musl-gcc || true)"
+                ;;
+              *)
+                linker=""
+                ;;
+            esac
+          fi
+          if [[ -z "$linker" ]]; then
+            echo "missing musl linker for ${TARGET}" >&2
+            exit 1
+          fi
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=${linker}" >> "$GITHUB_ENV"
+
       - name: Configure rustc UBSan wrapper
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -1105,14 +1099,14 @@ jobs:
             ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
           fi
           wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
-          cat > "${wrapper}" <<EOF
+          cat > "${wrapper}" <<EOF2
           #!/usr/bin/env bash
           set -euo pipefail
           if [[ -n "${ubsan}" ]]; then
             export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
           fi
           exec "\$1" "\${@:2}"
-          EOF
+          EOF2
           chmod +x "${wrapper}"
           echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
@@ -1122,15 +1116,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Keep the musl linker configuration explicit, and add a best-effort
-          # hint to reduce linker peak memory on constrained runners.
-          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory"
+          # Match the last known successful full release run while keeping Zig
+          # cache-dir filtering in the generated wrappers above.
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
           target_no_jitter="${target_no_jitter//-/_}"
           echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
+          printf 'CARGO_ENCODED_RUSTFLAGS=-C\x1flink-arg=-lm\x1f-C\x1flink-self-contained=no\n' >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
 
@@ -1139,13 +1137,11 @@ jobs:
             input="${input//-fsanitize=undefined/}"
             input="${input//-fno-sanitize-recover=undefined/}"
             input="${input//-fno-sanitize-trap=undefined/}"
-            input="${input//-Wno-error=frame-larger-than/}"
             echo "$input"
           }
 
           echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
           echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
-
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         if: ${{ env.TARGET != 'aarch64-apple-darwin' }}
