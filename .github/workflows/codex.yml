@@ -1035,7 +1035,8 @@ jobs:
           for name in ("zigcc", "zigcxx"):
               path = tool_root / name
               if not path.exists():
-                  raise SystemExit(f"missing generated wrapper: {path}")
+                  print(f"generated Zig wrapper not present, using non-Zig musl compiler: {path}")
+                  continue
               content = path.read_text(encoding="utf-8")
               content = content.replace(
                   "set -euo pipefail\n\n",
