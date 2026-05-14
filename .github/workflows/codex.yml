@@ -981,6 +981,37 @@ jobs:
             attempt=$((attempt + 1))
           done
 
+      - name: Patch generated Zig cc wrappers
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="${RUNNER_TEMP}/codex-musl-tools-${TARGET}"
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          tool_root = pathlib.Path(os.environ["RUNNER_TEMP"]) / f"codex-musl-tools-{os.environ['TARGET']}"
+          for name in ("zigcc", "zigcxx"):
+              path = tool_root / name
+              if not path.exists():
+                  raise SystemExit(f"missing generated wrapper: {path}")
+              content = path.read_text(encoding="utf-8")
+              content = content.replace(
+                  "set -euo pipefail\n\n",
+                  "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
+                  1,
+              )
+              needle = """  case \"${arg}\" in\n    --target)\n"""
+              if needle in content:
+                  content = content.replace(
+                      needle,
+                      """  case \"${arg}\" in\n    --cache-dir)\n      skip_next=1\n      continue\n      ;;\n    --cache-dir=*)\n      continue\n      ;;\n    --target)\n""",
+                      1,
+                  )
+              path.write_text(content, encoding="utf-8")
+          PY
+
       - name: Configure rustc UBSan wrapper
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -1037,6 +1068,7 @@ jobs:
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
+        if: ${{ env.TARGET != 'aarch64-apple-darwin' }}
         with:
           key: ${{ env.TARGET }}
           workspaces: |
