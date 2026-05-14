@@ -513,7 +513,7 @@ jobs:
           [[ -f "${build_root}/scripts/install/install.sh" ]] || exit 1
           [[ -f "${build_root}/scripts/install/install.ps1" ]] || exit 1
 
-      - name: Patch Zig cc cache-dir probe
+      - name: Patch Zig cc cache-dir handling
         shell: bash
         run: |
           set -euo pipefail
@@ -523,6 +523,15 @@ jobs:
 
           script = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src/.github/scripts/install-musl-build-tools.sh"
           content = script.read_text(encoding="utf-8")
+          prefix = "set -euo pipefail\n\n"
+          if content.count(prefix) != 3:
+              raise SystemExit("unexpected musl tool script shell preamble count")
+          content = content.replace(
+              prefix,
+              "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
+              2,
+          )
+
           needle = "    --target)\n      skip_next=1\n      continue\n      ;;\n"
           replacement = (
               "    --cache-dir)\n"
