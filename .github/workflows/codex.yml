@@ -970,18 +970,7 @@ jobs:
           set -euo pipefail
           attempt=1
           max_attempts=3
-          # Zig 0.14's `zig cc` currently leaks its cache-dir setting to clang
-          # under cc-rs compiler-family probes. Hide Zig while choosing the C/C++
-          # compiler so the source script falls back to the musl gcc toolchain.
-          path_without_zig=""
-          IFS=: read -r -a path_entries <<< "${PATH}"
-          for path_entry in "${path_entries[@]}"; do
-            if [[ -x "${path_entry}/zig" ]]; then
-              continue
-            fi
-            path_without_zig+="${path_without_zig:+:}${path_entry}"
-          done
-          until PATH="${path_without_zig}" bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
+          until bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
             if (( attempt >= max_attempts )); then
               echo "install-musl-build-tools failed after ${attempt} attempts" >&2
               exit 1
