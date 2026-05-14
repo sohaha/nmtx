@@ -1238,6 +1238,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
 
           limit="2.35"
 
@@ -1272,16 +1273,15 @@ jobs:
               || { echo "❌ ${bin} requires GLIBC_${max} > GLIBC_${limit}" >&2; exit 1; }
           }
 
-          require_max_glibc "target/${TARGET}/release/codex"
-          require_max_glibc "target/${TARGET}/release/codex-responses-api-proxy"
+          require_max_glibc "${release_dir}/codex"
+          require_max_glibc "${release_dir}/codex-responses-api-proxy"
           echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Smoke test Windows artifacts
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-rs"
-          $releaseDir = Join-Path $buildRoot "target/$env:TARGET/release"
+          $releaseDir = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET/release"
 
           if ($env:TARGET -eq "x86_64-pc-windows-msvc") {
             & (Join-Path $releaseDir "codex.exe") --version
@@ -1312,8 +1312,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          "target/${TARGET}/release/codex" --version
-          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          "${release_dir}/codex" --version
+          "${release_dir}/codex-responses-api-proxy" --help >/dev/null
 
       - name: Smoke test Linux artifacts
         if: ${{ runner.os == 'Linux' }}
@@ -1321,7 +1322,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          bin_dir="target/${TARGET}/release"
+          bin_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           for bin in codex codex-responses-api-proxy; do
             binary_path="${bin_dir}/${bin}"
             file "${binary_path}"
@@ -1359,8 +1360,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          "target/${TARGET}/release/codex" --version
-          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          "${release_dir}/codex" --version
+          "${release_dir}/codex-responses-api-proxy" --help >/dev/null
 
       - name: Build macOS dmg
         if: ${{ runner.os == 'macOS' }}
@@ -1369,7 +1371,7 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
 
-          release_dir="target/${TARGET}/release"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           dmg_path="${release_dir}/codex-${TARGET}.dmg"
           tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
@@ -1439,7 +1441,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          release_dir="target/${TARGET}/release"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           for binary in codex codex-responses-api-proxy; do
             codesign --verify --strict --verbose=2 "${release_dir}/${binary}"
           done
@@ -1451,6 +1453,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           ext=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             ext=".exe"
@@ -1458,17 +1461,17 @@ jobs:
 
           dest="dist/${TARGET}"
           mkdir -p "$dest"
-          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
-          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          cp "${release_dir}/codex${ext}" "$dest/codex-${TARGET}${ext}"
+          cp "${release_dir}/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
-            cp "target/${TARGET}/release/bwrap" "$dest/bwrap-${TARGET}"
+            cp "${release_dir}/bwrap" "$dest/bwrap-${TARGET}"
           fi
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "target/${TARGET}/release/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
-            cp "target/${TARGET}/release/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
+            cp "${release_dir}/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
+            cp "${release_dir}/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
           fi
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            cp "target/${TARGET}/release/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
+            cp "${release_dir}/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
 
       - name: Compress artifacts
