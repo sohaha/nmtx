@@ -531,6 +531,16 @@ jobs:
               "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
               2,
           )
+          content = content.replace(
+              'exec "${zig_bin}" cc -target "${zig_target}" "\${args[@]}"',
+              'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" cc -target "${zig_target}" "\${args[@]}"',
+              1,
+          )
+          content = content.replace(
+              'exec "${zig_bin}" c++ -target "${zig_target}" "\${args[@]}"',
+              'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" c++ -target "${zig_target}" "\${args[@]}"',
+              1,
+          )
 
           needle = "    --target)\n      skip_next=1\n      continue\n      ;;\n"
           replacement = (
@@ -910,9 +920,19 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libubsan1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.93.0
-        with:
-          targets: ${{ env.TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_file="${GITHUB_WORKSPACE}/build-src/codex-rs/rust-toolchain.toml"
+          channel="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' "${toolchain_file}")"
+          if [[ -z "${channel}" ]]; then
+            echo "failed to read Rust channel from ${toolchain_file}" >&2
+            exit 1
+          fi
+          rustup toolchain install "${channel}" --target "${TARGET}" --profile minimal --no-self-update
+          rustup default "${channel}"
+          rustc --version --verbose
+          cargo --version --verbose
 
       - name: Use git CLI for Cargo git dependencies
         if: ${{ runner.os == 'macOS' }}
@@ -1012,6 +1032,16 @@ jobs:
               content = content.replace(
                   "set -euo pipefail\n\n",
                   "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
+                  1,
+              )
+              content = content.replace(
+                  'exec "${zig_bin}" cc -target "${zig_target}" "${args[@]}"',
+                  'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" cc -target "${zig_target}" "${args[@]}"',
+                  1,
+              )
+              content = content.replace(
+                  'exec "${zig_bin}" c++ -target "${zig_target}" "${args[@]}"',
+                  'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" c++ -target "${zig_target}" "${args[@]}"',
                   1,
               )
               cache_filter = (
@@ -1305,7 +1335,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo_bin="$(rustup which cargo 2>/dev/null || command -v cargo)"
+          cargo_bin="$(command -v cargo)"
           timings=(--timings)
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
