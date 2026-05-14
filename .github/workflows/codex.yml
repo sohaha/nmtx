@@ -1344,7 +1344,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo_bin="$(rustup which cargo 2>/dev/null || command -v cargo)"
+          cargo_bin="$(command -v cargo)"
           timings=(--timings)
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
