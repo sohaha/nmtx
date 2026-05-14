@@ -513,6 +513,67 @@ jobs:
           [[ -f "${build_root}/scripts/install/install.sh" ]] || exit 1
           [[ -f "${build_root}/scripts/install/install.ps1" ]] || exit 1
 
+      - name: Patch Zig cc cache-dir probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          script = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src/.github/scripts/install-musl-build-tools.sh"
+          content = script.read_text(encoding="utf-8")
+          needle = """    --target)
+      skip_next=1
+      continue
+      ;;
+"""
+          replacement = """    --cache-dir)
+      # cc-rs uses this probe flag when identifying compiler families, but
+      # Zig 0.14 forwards it to clang where it is rejected.
+      skip_next=1
+      continue
+      ;;
+    --cache-dir=*)
+      continue
+      ;;
+    --target)
+      skip_next=1
+      continue
+      ;;
+"""
+          count = content.count(needle)
+          if count != 1:
+              raise SystemExit(f"expected one Zig cc target-filter block, found {count}")
+          content = content.replace(needle, replacement, 1)
+          needle_cxx = """    --target)
+      # Drop explicit --target and its value: we always pass zig's -target below.
+      skip_next=1
+      continue
+      ;;
+"""
+          replacement_cxx = """    --cache-dir)
+      # cc-rs uses this probe flag when identifying compiler families, but
+      # Zig 0.14 forwards it to clang where it is rejected.
+      skip_next=1
+      continue
+      ;;
+    --cache-dir=*)
+      continue
+      ;;
+    --target)
+      # Drop explicit --target and its value: we always pass zig's -target below.
+      skip_next=1
+      continue
+      ;;
+"""
+          count = content.count(needle_cxx)
+          if count != 1:
+              raise SystemExit(f"expected one Zig cxx target-filter block, found {count}")
+          content = content.replace(needle_cxx, replacement_cxx, 1)
+          script.write_text(content, encoding="utf-8")
+          PY
+
       - name: Sync Cargo workspace version from release
         shell: bash
         run: |
