@@ -921,6 +921,18 @@ jobs:
           set -euo pipefail
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
+      - name: Isolate aarch64 macOS Cargo state
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${RUNNER_TEMP}/cargo-home-${TARGET}"
+          target_dir="${RUNNER_TEMP}/cargo-target-${TARGET}"
+          mkdir -p "${cargo_home}/bin" "${target_dir}"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=${target_dir}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+
       - name: Setup MSVC toolchain
         if: ${{ runner.os == 'Windows' }}
         uses: ilammy/msvc-dev-cmd@v1
@@ -1090,7 +1102,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${CARGO_TARGET_DIR}/${TARGET}/release" "${CARGO_TARGET_DIR}/release"
+          rm -rf "${CARGO_TARGET_DIR}"
+          mkdir -p "${CARGO_TARGET_DIR}"
 
       - name: Configure musl rusty_v8 artifact overrides
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
