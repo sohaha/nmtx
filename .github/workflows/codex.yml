@@ -1002,13 +1002,22 @@ jobs:
                   "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
                   1,
               )
-              needle = """  case \"${arg}\" in\n    --target)\n"""
-              if needle in content:
-                  content = content.replace(
-                      needle,
-                      """  case \"${arg}\" in\n    --cache-dir)\n      skip_next=1\n      continue\n      ;;\n    --cache-dir=*)\n      continue\n      ;;\n    --target)\n""",
-                      1,
-                  )
+              cache_filter = (
+                  "  case \"${arg}\" in\n"
+                  "    --cache-dir)\n"
+                  "      skip_next=1\n"
+                  "      continue\n"
+                  "      ;;\n"
+                  "    --cache-dir=*)\n"
+                  "      continue\n"
+                  "      ;;\n"
+              )
+              if "--cache-dir)" not in content:
+                  marker = "  case \"${arg}\" in\n"
+                  count = content.count(marker)
+                  if count != 1:
+                      raise SystemExit(f"expected one arg case block in {path}, found {count}")
+                  content = content.replace(marker, cache_filter, 1)
               path.write_text(content, encoding="utf-8")
           PY
 
@@ -1075,6 +1084,13 @@ jobs:
             ${{ github.workspace }}/build-src/codex-rs -> target
           cache-directories: |
             ${{ github.workspace }}/.cargo-home
+
+      - name: Clear stale aarch64 macOS target artifacts
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${CARGO_TARGET_DIR}/${TARGET}/release" "${CARGO_TARGET_DIR}/release"
 
       - name: Configure musl rusty_v8 artifact overrides
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
