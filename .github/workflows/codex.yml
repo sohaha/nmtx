@@ -1002,7 +1002,15 @@ jobs:
           set -euo pipefail
           attempt=1
           max_attempts=3
-          until bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
+          path_without_zig=""
+          IFS=: read -r -a path_entries <<< "${PATH}"
+          for path_entry in "${path_entries[@]}"; do
+            if [[ -x "${path_entry}/zig" ]]; then
+              continue
+            fi
+            path_without_zig+="${path_without_zig:+:}${path_entry}"
+          done
+          until PATH="${path_without_zig}" bash "${GITHUB_WORKSPACE}/build-src/.github/scripts/install-musl-build-tools.sh"; do
             if (( attempt >= max_attempts )); then
               echo "install-musl-build-tools failed after ${attempt} attempts" >&2
               exit 1
@@ -1092,7 +1100,7 @@ jobs:
           set -euo pipefail
           # Keep the musl linker configuration explicit, and add a best-effort
           # hint to reduce linker peak memory on constrained runners.
-          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
           target_no_jitter="${target_no_jitter//-/_}"
@@ -1102,7 +1110,7 @@ jobs:
           echo "CARGO_BUILD_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${common_rustflags}" >> "$GITHUB_ENV"
-          printf 'CARGO_ENCODED_RUSTFLAGS=-C\x1flink-arg=-lm\x1f-C\x1flink-self-contained=no\n' >> "$GITHUB_ENV"
+          printf 'CARGO_ENCODED_RUSTFLAGS=-C\x1flink-arg=-lm\x1f-C\x1flink-arg=-Wl,--no-keep-memory\n' >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
 
@@ -1335,7 +1343,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          cargo_bin="$(command -v cargo)"
+          cargo_bin="$(rustup which cargo 2>/dev/null || command -v cargo)"
           timings=(--timings)
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
