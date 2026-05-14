@@ -523,50 +523,49 @@ jobs:
 
           script = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src/.github/scripts/install-musl-build-tools.sh"
           content = script.read_text(encoding="utf-8")
-          needle = """    --target)
-      skip_next=1
-      continue
-      ;;
-"""
-          replacement = """    --cache-dir)
-      # cc-rs uses this probe flag when identifying compiler families, but
-      # Zig 0.14 forwards it to clang where it is rejected.
-      skip_next=1
-      continue
-      ;;
-    --cache-dir=*)
-      continue
-      ;;
-    --target)
-      skip_next=1
-      continue
-      ;;
-"""
+          needle = "    --target)\n      skip_next=1\n      continue\n      ;;\n"
+          replacement = (
+              "    --cache-dir)\n"
+              "      # cc-rs uses this probe flag when identifying compiler families, but\n"
+              "      # Zig 0.14 forwards it to clang where it is rejected.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --cache-dir=*)\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --target)\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
           count = content.count(needle)
           if count != 1:
               raise SystemExit(f"expected one Zig cc target-filter block, found {count}")
           content = content.replace(needle, replacement, 1)
-          needle_cxx = """    --target)
-      # Drop explicit --target and its value: we always pass zig's -target below.
-      skip_next=1
-      continue
-      ;;
-"""
-          replacement_cxx = """    --cache-dir)
-      # cc-rs uses this probe flag when identifying compiler families, but
-      # Zig 0.14 forwards it to clang where it is rejected.
-      skip_next=1
-      continue
-      ;;
-    --cache-dir=*)
-      continue
-      ;;
-    --target)
-      # Drop explicit --target and its value: we always pass zig's -target below.
-      skip_next=1
-      continue
-      ;;
-"""
+          needle_cxx = (
+              "    --target)\n"
+              "      # Drop explicit --target and its value: we always pass zig's -target below.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
+          replacement_cxx = (
+              "    --cache-dir)\n"
+              "      # cc-rs uses this probe flag when identifying compiler families, but\n"
+              "      # Zig 0.14 forwards it to clang where it is rejected.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --cache-dir=*)\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --target)\n"
+              "      # Drop explicit --target and its value: we always pass zig's -target below.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
           count = content.count(needle_cxx)
           if count != 1:
               raise SystemExit(f"expected one Zig cxx target-filter block, found {count}")
