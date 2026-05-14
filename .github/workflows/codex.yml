@@ -1139,6 +1139,7 @@ jobs:
             input="${input//-fsanitize=undefined/}"
             input="${input//-fno-sanitize-recover=undefined/}"
             input="${input//-fno-sanitize-trap=undefined/}"
+            input="${input//-Wno-error=frame-larger-than/}"
             echo "$input"
           }
 
