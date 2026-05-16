@@ -1307,7 +1307,7 @@ jobs:
           if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
             echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           else
             echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
@@ -1329,7 +1329,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # Keep the aarch64 Windows build serialized, but use thin LTO to avoid
           # the large code-size regression caused by disabling LTO entirely.
-          "CARGO_PROFILE_RELEASE_LTO=thin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_LTO=fat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Enabled thin LTO with serialized jobs for aarch64 Windows cross-compile"
@@ -1341,7 +1341,7 @@ jobs:
           set -euo pipefail
           # aarch64 macOS has no cache and LTO linking takes longer, so keep the
           # build serialized while preserving thin LTO to avoid bloated release binaries.
-          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
 
