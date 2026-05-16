@@ -1301,12 +1301,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # x86_64 hosted runners can also OOM during linking. Reduce
-          # parallelism and peak memory pressure for stability.
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
-          # Disable LTO to cut peak link memory.
-          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          # x86_64 hosted runners can also OOM during linking. Keep the
+          # GNU fallback conservative, but preserve LTO for musl release binaries:
+          # disabling LTO made @sohaha/zcodex-linux-x64 grow by about 48 MiB.
+          if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
+            echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          else
+            echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          fi
           if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
             extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
             if [[ -n "${RUSTFLAGS:-}" ]]; then
