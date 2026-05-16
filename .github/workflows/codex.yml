@@ -1118,7 +1118,7 @@ jobs:
           set -euo pipefail
           # Match the last known successful full release run while keeping Zig
           # cache-dir filtering in the generated wrappers above.
-          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no --remap-path-prefix=${GITHUB_WORKSPACE}=/.build"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
           target_no_jitter="${target_no_jitter//-/_}"
