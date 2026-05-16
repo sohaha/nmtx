@@ -1327,25 +1327,23 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Cross-compiling to aarch64-windows on x86_64-windows runner with
-          # aggressive LTO settings causes OOM. Disable LTO and increase
-          # codegen-units to reduce peak memory.
-          "CARGO_PROFILE_RELEASE_LTO=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Keep the aarch64 Windows build serialized, but use thin LTO to avoid
+          # the large code-size regression caused by disabling LTO entirely.
+          "CARGO_PROFILE_RELEASE_LTO=thin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Disabled LTO and increased codegen-units for aarch64 Windows cross-compile"
+          Write-Host "Enabled thin LTO with serialized jobs for aarch64 Windows cross-compile"
 
       - name: Reduce Rust build memory on aarch64 macOS
         if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
         shell: bash
         run: |
           set -euo pipefail
-          # aarch64 macOS has no cache and LTO linking takes extremely long.
-          # Disable LTO to cut link time; the first build also populates
-          # the cache for subsequent runs.
-          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          # aarch64 macOS has no cache and LTO linking takes longer, so keep the
+          # build serialized while preserving thin LTO to avoid bloated release binaries.
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
 
       - name: Enable swap on Linux runner
         if: ${{ runner.os == 'Linux' }}
