@@ -1879,6 +1879,49 @@ jobs:
             rm -rf "$workdir"
           done
 
+      - name: Enforce npm package size budgets
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(dist/npm/*.tgz)
+          [[ ${#tarballs[@]} -gt 0 ]] || {
+            echo "no npm tarballs found for size budget checks"
+            exit 1
+          }
+          for tarball in "${tarballs[@]}"; do
+            workdir="$(mktemp -d)"
+            tar -xzf "${tarball}" -C "${workdir}"
+            package_name="$(node -e 'const fs=require("fs"); const p=process.argv[1]; console.log(JSON.parse(fs.readFileSync(p,"utf8")).name)' "${workdir}/package/package.json")"
+            budget=""
+            case "${package_name}" in
+              @sohaha/zcodex-linux-x64)
+                codex_path="${workdir}/package/vendor/x86_64-unknown-linux-musl/codex/codex"
+                budget=235000000
+                ;;
+              @sohaha/zcodex-darwin-arm64)
+                codex_path="${workdir}/package/vendor/aarch64-apple-darwin/codex/codex"
+                budget=245000000
+                ;;
+              @sohaha/zcodex-win32-arm64)
+                codex_path="${workdir}/package/vendor/aarch64-pc-windows-msvc/codex/codex.exe"
+                budget=285000000
+                ;;
+              *)
+                rm -rf "${workdir}"
+                continue
+                ;;
+            esac
+            actual_size="$(stat -c %s "${codex_path}")"
+            if [[ "${actual_size}" -gt "${budget}" ]]; then
+              echo "npm package ${package_name} codex binary too large: ${actual_size} bytes > budget ${budget} bytes" >&2
+              exit 1
+            fi
+            echo "npm package ${package_name} codex binary size: ${actual_size} bytes (budget: ${budget})"
+            rm -rf "${workdir}"
+          done
+
       - name: Resolve GitHub release token
         shell: bash
         env:
