@@ -1649,6 +1649,35 @@ jobs:
             cp "${release_dir}/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
 
+      - name: Enforce artifact size budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+          codex_path="dist/${TARGET}/codex-${TARGET}${ext}"
+          actual_size="$(stat -c %s "${codex_path}")"
+          budget=""
+          case "${TARGET}" in
+            x86_64-unknown-linux-musl)
+              budget=235000000
+              ;;
+            aarch64-apple-darwin)
+              budget=245000000
+              ;;
+            aarch64-pc-windows-msvc)
+              budget=285000000
+              ;;
+          esac
+          if [[ -n "${budget}" && "${actual_size}" -gt "${budget}" ]]; then
+            echo "codex artifact too large for ${TARGET}: ${actual_size} bytes > budget ${budget} bytes" >&2
+            exit 1
+          fi
+          echo "codex artifact size for ${TARGET}: ${actual_size} bytes (budget: ${budget:-none})"
+
       - name: Summarize artifact sizes
         shell: bash
         run: |
