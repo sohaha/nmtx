@@ -33,6 +33,11 @@ name: Build Codex Release
         type: string
         default: build-only
         description: Release mode. Use build-only for fast smoke tests, full for build+release, or npm-only to only publish npm from an existing GitHub release.
+      enable_aws_auth:
+        required: false
+        type: boolean
+        default: false
+        description: Enable optional AWS Bedrock/SigV4 auth dependencies in release binaries.
 
 permissions:
   contents: read
@@ -61,6 +66,7 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
       should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
       npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
+      enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}
     steps:
       - name: Resolve payload
         id: payload
@@ -74,6 +80,7 @@ jobs:
             targets_input="${{ github.event.client_payload.targets || 'all' }}"
             release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
             publish_mode="${{ github.event.client_payload.publish_mode || 'full' }}"
+            enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
           else
             version="${{ inputs.version }}"
             source_ref="${{ inputs.source_ref }}"
@@ -81,6 +88,7 @@ jobs:
             targets_input="${{ inputs.targets }}"
             release_repo="${{ inputs.release_repo }}"
             publish_mode="${{ inputs.publish_mode }}"
+            enable_aws_auth="${{ inputs.enable_aws_auth }}"
           fi
 
           source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
@@ -111,6 +119,7 @@ jobs:
           echo "targets_input=${targets_input}" >> "$GITHUB_OUTPUT"
           echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
           echo "publish_mode=${publish_mode}" >> "$GITHUB_OUTPUT"
+          echo "enable_aws_auth=${enable_aws_auth}" >> "$GITHUB_OUTPUT"
           echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
@@ -127,6 +136,14 @@ jobs:
               ;;
             *)
               echo "unsupported publish_mode: ${{ steps.payload.outputs.publish_mode }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_aws_auth }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}"
               exit 1
               ;;
           esac
@@ -450,6 +467,7 @@ jobs:
       SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      CODEX_RELEASE_ENABLE_AWS_AUTH: ${{ needs.resolve.outputs.enable_aws_auth }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
 
     steps:
@@ -1379,6 +1397,10 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           cargo_bin="$(command -v cargo)"
           timings=(--timings)
+          feature_args=()
+          if [[ "${CODEX_RELEASE_ENABLE_AWS_AUTH}" == "true" ]]; then
+            feature_args=(--features aws-auth)
+          fi
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
             # for the flakiest target.
@@ -1386,15 +1408,20 @@ jobs:
           fi
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Link one binary at a time to reduce peak memory pressure.
-            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
             "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
           else
-            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
-              --bin codex \
-              --bin codex-responses-api-proxy
+            if [[ "${#feature_args[@]}" -gt 0 ]]; then
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+            else
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
+                --bin codex \
+                --bin codex-responses-api-proxy
+            fi
           fi
 
       - name: Cargo build (Windows)
@@ -1404,10 +1431,22 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Set-Location "$env:GITHUB_WORKSPACE/build-src/codex-rs"
 
-          cargo build --target $env:TARGET --release --timings `
-            -p codex-cli `
-            -p codex-responses-api-proxy `
-            -p codex-windows-sandbox
+          $featureArgs = @()
+          if ($env:CODEX_RELEASE_ENABLE_AWS_AUTH -eq "true") {
+            $featureArgs = @("--features", "aws-auth")
+          }
+
+          if ($featureArgs.Count -gt 0) {
+            cargo build --target $env:TARGET --release --timings @featureArgs -p codex-cli
+            cargo build --target $env:TARGET --release --timings `
+              -p codex-responses-api-proxy `
+              -p codex-windows-sandbox
+          } else {
+            cargo build --target $env:TARGET --release --timings `
+              -p codex-cli `
+              -p codex-responses-api-proxy `
+              -p codex-windows-sandbox
+          }
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
         if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
