@@ -38,6 +38,11 @@ name: Build Codex Release
         type: boolean
         default: false
         description: Enable optional AWS Bedrock/SigV4 auth dependencies in release binaries.
+      enable_semantic_embeddings:
+        required: false
+        type: boolean
+        default: false
+        description: Enable optional ztldr semantic embedding dependencies in release binaries.
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
       should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
       npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
       enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}
+      enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}
     steps:
       - name: Resolve payload
         id: payload
@@ -81,6 +87,7 @@ jobs:
             release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
             publish_mode="${{ github.event.client_payload.publish_mode || 'full' }}"
             enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
+            enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
           else
             version="${{ inputs.version }}"
             source_ref="${{ inputs.source_ref }}"
@@ -89,6 +96,7 @@ jobs:
             release_repo="${{ inputs.release_repo }}"
             publish_mode="${{ inputs.publish_mode }}"
             enable_aws_auth="${{ inputs.enable_aws_auth }}"
+            enable_semantic_embeddings="${{ inputs.enable_semantic_embeddings }}"
           fi
 
           source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
@@ -120,6 +128,7 @@ jobs:
           echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
           echo "publish_mode=${publish_mode}" >> "$GITHUB_OUTPUT"
           echo "enable_aws_auth=${enable_aws_auth}" >> "$GITHUB_OUTPUT"
+          echo "enable_semantic_embeddings=${enable_semantic_embeddings}" >> "$GITHUB_OUTPUT"
           echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
@@ -144,6 +153,14 @@ jobs:
               ;;
             *)
               echo "unsupported enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_semantic_embeddings }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}"
               exit 1
               ;;
           esac
@@ -468,6 +485,7 @@ jobs:
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       CODEX_RELEASE_ENABLE_AWS_AUTH: ${{ needs.resolve.outputs.enable_aws_auth }}
+      CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS: ${{ needs.resolve.outputs.enable_semantic_embeddings }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
 
     steps:
@@ -1397,9 +1415,16 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           cargo_bin="$(command -v cargo)"
           timings=(--timings)
-          feature_args=()
+          enabled_features=()
           if [[ "${CODEX_RELEASE_ENABLE_AWS_AUTH}" == "true" ]]; then
-            feature_args=(--features aws-auth)
+            enabled_features+=(aws-auth)
+          fi
+          if [[ "${CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS}" == "true" ]]; then
+            enabled_features+=(semantic-embeddings)
+          fi
+          feature_args=()
+          if [[ "${#enabled_features[@]}" -gt 0 ]]; then
+            feature_args=(--features "$(IFS=,; echo "${enabled_features[*]}")")
           fi
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
@@ -1431,9 +1456,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Set-Location "$env:GITHUB_WORKSPACE/build-src/codex-rs"
 
-          $featureArgs = @()
+          $enabledFeatures = @()
           if ($env:CODEX_RELEASE_ENABLE_AWS_AUTH -eq "true") {
-            $featureArgs = @("--features", "aws-auth")
+            $enabledFeatures += "aws-auth"
+          }
+          if ($env:CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS -eq "true") {
+            $enabledFeatures += "semantic-embeddings"
+          }
+          $featureArgs = @()
+          if ($enabledFeatures.Count -gt 0) {
+            $featureArgs = @("--features", ($enabledFeatures -join ","))
           }
 
           if ($featureArgs.Count -gt 0) {

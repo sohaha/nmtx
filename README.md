@@ -30,6 +30,8 @@ enable_aws_auth=false
 
 Default release builds leave it disabled and therefore do not pass `--features aws-auth` to the `codex` binary build. Set `enable_aws_auth=true` only for releases that intentionally include the AWS SDK auth stack (`aws-config`, `aws-sdk-*`, `aws-smithy-*`).
 
+`enable_semantic_embeddings=false` is also the default. Set it to `true` only when the release intentionally bundles ztldr semantic embedding support and accepts the extra `fastembed` / ONNX Runtime / tokenizer dependency stack.
+
 Example manual smoke build with AWS auth enabled:
 
 ```bash
