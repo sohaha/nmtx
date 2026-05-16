@@ -1308,6 +1308,8 @@ jobs:
             echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
             echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+            echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
           else
             echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
@@ -1331,6 +1333,8 @@ jobs:
           # the large code-size regression caused by disabling LTO entirely.
           "CARGO_PROFILE_RELEASE_LTO=fat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_STRIP=symbols" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Enabled fat LTO with serialized jobs for aarch64 Windows cross-compile"
 
@@ -1343,6 +1347,8 @@ jobs:
           # build serialized while preserving fat LTO to avoid bloated release binaries.
           echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
 
       - name: Enable swap on Linux runner
