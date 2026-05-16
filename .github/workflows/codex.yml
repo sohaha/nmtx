@@ -1643,6 +1643,20 @@ jobs:
             cp "${release_dir}/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
 
+      - name: Summarize artifact sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          dest="dist/${TARGET}"
+          echo "### Artifact sizes for ${TARGET}" >> "${GITHUB_STEP_SUMMARY}"
+          find "${dest}" -maxdepth 1 -type f -printf "%s %f\n" | sort -nr | tee /tmp/artifact-sizes.txt
+          {
+            echo '```text'
+            cat /tmp/artifact-sizes.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Compress artifacts
         shell: bash
         run: |
