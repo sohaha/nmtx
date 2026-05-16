@@ -1732,7 +1732,7 @@ jobs:
             ext=".exe"
           fi
           codex_path="dist/${TARGET}/codex-${TARGET}${ext}"
-          actual_size="$(stat -c %s "${codex_path}")"
+          actual_size="$(wc -c < "${codex_path}" | tr -d '[:space:]')"
           budget=""
           case "${TARGET}" in
             x86_64-unknown-linux-musl)
@@ -1758,7 +1758,11 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           dest="dist/${TARGET}"
           echo "### Artifact sizes for ${TARGET}" >> "${GITHUB_STEP_SUMMARY}"
-          find "${dest}" -maxdepth 1 -type f -printf "%s %f\n" | sort -nr | tee /tmp/artifact-sizes.txt
+          for f in "${dest}"/*; do
+            [[ -f "$f" ]] || continue
+            size="$(wc -c < "$f" | tr -d '[:space:]')"
+            printf "%s %s\n" "$size" "$(basename "$f")"
+          done | sort -nr | tee /tmp/artifact-sizes.txt
           {
             echo '```text'
             cat /tmp/artifact-sizes.txt
@@ -1986,7 +1990,7 @@ jobs:
                 continue
                 ;;
             esac
-            actual_size="$(stat -c %s "${codex_path}")"
+            actual_size="$(wc -c < "${codex_path}" | tr -d '[:space:]')"
             if [[ "${actual_size}" -gt "${budget}" ]]; then
               echo "npm package ${package_name} codex binary too large: ${actual_size} bytes > budget ${budget} bytes" >&2
               exit 1
