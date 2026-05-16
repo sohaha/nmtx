@@ -43,6 +43,11 @@ name: Build Codex Release
         type: boolean
         default: false
         description: Enable optional ztldr semantic embedding dependencies in release binaries.
+      enable_posthog_analytics:
+        required: false
+        type: boolean
+        default: false
+        description: Enable optional PostHog analytics HTTP client dependencies in release binaries.
 
 permissions:
   contents: read
@@ -73,6 +78,7 @@ jobs:
       npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
       enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}
       enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}
+      enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}
     steps:
       - name: Resolve payload
         id: payload
@@ -88,6 +94,7 @@ jobs:
             publish_mode="${{ github.event.client_payload.publish_mode || 'full' }}"
             enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
             enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
+            enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'false' }}"
           else
             version="${{ inputs.version }}"
             source_ref="${{ inputs.source_ref }}"
@@ -97,6 +104,7 @@ jobs:
             publish_mode="${{ inputs.publish_mode }}"
             enable_aws_auth="${{ inputs.enable_aws_auth }}"
             enable_semantic_embeddings="${{ inputs.enable_semantic_embeddings }}"
+            enable_posthog_analytics="${{ inputs.enable_posthog_analytics }}"
           fi
 
           source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
@@ -129,6 +137,7 @@ jobs:
           echo "publish_mode=${publish_mode}" >> "$GITHUB_OUTPUT"
           echo "enable_aws_auth=${enable_aws_auth}" >> "$GITHUB_OUTPUT"
           echo "enable_semantic_embeddings=${enable_semantic_embeddings}" >> "$GITHUB_OUTPUT"
+          echo "enable_posthog_analytics=${enable_posthog_analytics}" >> "$GITHUB_OUTPUT"
           echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
@@ -161,6 +170,14 @@ jobs:
               ;;
             *)
               echo "unsupported enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_posthog_analytics }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}"
               exit 1
               ;;
           esac
@@ -486,6 +503,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       CODEX_RELEASE_ENABLE_AWS_AUTH: ${{ needs.resolve.outputs.enable_aws_auth }}
       CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS: ${{ needs.resolve.outputs.enable_semantic_embeddings }}
+      CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS: ${{ needs.resolve.outputs.enable_posthog_analytics }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
 
     steps:
@@ -1422,6 +1440,9 @@ jobs:
           if [[ "${CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS}" == "true" ]]; then
             enabled_features+=(semantic-embeddings)
           fi
+          if [[ "${CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS}" == "true" ]]; then
+            enabled_features+=(posthog-analytics)
+          fi
           feature_args=()
           if [[ "${#enabled_features[@]}" -gt 0 ]]; then
             feature_args=(--features "$(IFS=,; echo "${enabled_features[*]}")")
@@ -1462,6 +1483,9 @@ jobs:
           }
           if ($env:CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS -eq "true") {
             $enabledFeatures += "semantic-embeddings"
+          }
+          if ($env:CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS -eq "true") {
+            $enabledFeatures += "posthog-analytics"
           }
           $featureArgs = @()
           if ($enabledFeatures.Count -gt 0) {

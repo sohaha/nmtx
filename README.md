@@ -32,6 +32,8 @@ Default release builds leave it disabled and therefore do not pass `--features a
 
 `enable_semantic_embeddings=false` is also the default. Set it to `true` only when the release intentionally bundles ztldr semantic embedding support and accepts the extra `fastembed` / ONNX Runtime / tokenizer dependency stack.
 
+`enable_posthog_analytics=false` is also the default. Set it to `true` only when the release intentionally bundles the PostHog startup analytics client and accepts the extra `posthog-rs` / `reqwest 0.13` dependency stack.
+
 Example manual smoke build with AWS auth enabled:
 
 ```bash
