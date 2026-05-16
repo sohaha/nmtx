@@ -1386,12 +1386,7 @@ jobs:
           fi
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Link one binary at a time to reduce peak memory pressure.
-            if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-              CARGO_PROFILE_RELEASE_OPT_LEVEL=3 \
-                "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex
-            else
-              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex
-            fi
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex
             "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
@@ -1670,7 +1665,7 @@ jobs:
           budget=""
           case "${TARGET}" in
             x86_64-unknown-linux-musl)
-              budget=235000000
+              budget=190000000
               ;;
             aarch64-apple-darwin)
               budget=245000000
@@ -1905,7 +1900,7 @@ jobs:
             case "${package_name}" in
               @sohaha/zcodex-linux-x64)
                 codex_path="${workdir}/package/vendor/x86_64-unknown-linux-musl/codex/codex"
-                budget=235000000
+                budget=190000000
                 ;;
               @sohaha/zcodex-darwin-arm64)
                 codex_path="${workdir}/package/vendor/aarch64-apple-darwin/codex/codex"
