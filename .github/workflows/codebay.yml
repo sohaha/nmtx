@@ -1,0 +1,1086 @@
+name: Build Codebay Release
+
+on:
+  repository_dispatch:
+    types: [build-codebay-release]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        required: true
+        type: string
+        default: sohaha/codebay
+      source_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      target:
+        required: true
+        type: choice
+        options:
+          - win-x64
+          - linux-x64
+          - linux-arm64
+          - mac-arm64
+          - mac-x64
+      targets:
+        required: false
+        type: string
+        description: "Optional comma-separated targets. Supports mac/linux aliases and normalizes win-64 to win-x64."
+      channel:
+        required: true
+        type: choice
+        options:
+          - latest
+          - canary
+        default: latest
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/codebay-releases
+
+permissions:
+  contents: read
+
+env:
+  # Safety net: force Node.js 24 for any JavaScript-based actions that still
+  # target Node 20 (e.g. transitive actions in composite workflows).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_repo: ${{ steps.payload.outputs.source_repo }}
+      source_sha: ${{ steps.payload.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      targets: ${{ steps.targets.outputs.targets }}
+      channel: ${{ steps.payload.outputs.channel }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      matrix: ${{ steps.targets.outputs.matrix || '{"include":[]}' }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ github.event.client_payload.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ github.event.client_payload.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ github.event.client_payload.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ github.event.client_payload.release_repo }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_repo=${{ inputs.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/codebay" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codebay-releases" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.channel }}" =~ ^(latest|canary)$ ]] || exit 1
+
+      - name: Normalize targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_TARGETS='${{ steps.payload.outputs.targets_input }}'
+          if [[ -z "$RAW_TARGETS" ]]; then
+            RAW_TARGETS='${{ steps.payload.outputs.target }}'
+          fi
+
+          RAW_TARGETS="${RAW_TARGETS//[[:space:]]/}"
+          [[ -n "$RAW_TARGETS" ]] || {
+            echo "missing target(s)"
+            exit 1
+          }
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$RAW_TARGETS"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              mac)
+                expanded=("mac-arm64" "mac-x64")
+                ;;
+              linux)
+                expanded=("linux-x64" "linux-arm64")
+                ;;
+              win-64)
+                expanded=("win-x64")
+                ;;
+              all)
+                expanded=("win-x64" "mac-arm64" "mac-x64")
+                ;;
+              win-x64|linux-x64|linux-arm64|mac-arm64|mac-x64)
+                expanded=("$item")
+                ;;
+              *)
+                echo "invalid target: $item"
+                exit 1
+                ;;
+            esac
+
+            for expanded_target in "${expanded[@]}"; do
+              if [[ -z "${seen[$expanded_target]:-}" ]]; then
+                seen[$expanded_target]=1
+                normalized+=("$expanded_target")
+              fi
+            done
+          done
+
+          targets_csv="$(IFS=,; echo "${normalized[*]}")"
+          matrix_entries=()
+          for normalized_target in "${normalized[@]}"; do
+            case "$normalized_target" in
+              win-x64)
+                runner="windows-latest"
+                ;;
+              linux-x64)
+                runner="ubuntu-24.04"
+                ;;
+              linux-arm64)
+                runner="ubuntu-24.04-arm"
+                ;;
+              mac-arm64)
+                runner="macos-latest"
+                ;;
+              mac-x64)
+                runner="macos-15-intel"
+                ;;
+              *)
+                echo "unsupported target: $normalized_target"
+                exit 1
+                ;;
+            esac
+            matrix_entries+=("{\"target\":\"$normalized_target\",\"runner\":\"$runner\"}")
+          done
+
+          matrix='{"include":['
+          if [[ "${#matrix_entries[@]}" -gt 0 ]]; then
+            matrix+="$(IFS=,; echo "${matrix_entries[*]}")"
+          fi
+          matrix+=']}'
+
+          echo "targets=$targets_csv" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  validate_secrets:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CODEBAY_SOURCE_READ_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in CODEBAY_SOURCE_READ_TOKEN CODEBAY_RELEASE_WRITE_TOKEN; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "请在 ${GITHUB_REPOSITORY} 仓库中设置以下 GitHub Actions secrets:"
+            printf '  - %s\n' "${missing[@]}"
+            echo "路径: Settings -> Secrets and variables -> Actions"
+            exit 1
+          fi
+
+      - name: Validate macOS signing secrets
+        if: ${{ contains(needs.resolve.outputs.targets, 'mac-arm64') || contains(needs.resolve.outputs.targets, 'mac-x64') }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+  validate_source_access:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source commit is reachable on GitHub
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          repo='${{ needs.resolve.outputs.source_repo }}'
+          sha='${{ needs.resolve.outputs.source_sha }}'
+          api_url="https://api.github.com/repos/${repo}/commits/${sha}"
+          response_file="${RUNNER_TEMP}/source-commit-response.json"
+
+          status_code="$(
+            curl -sS \
+              -o "$response_file" \
+              -w "%{http_code}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${SOURCE_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$api_url"
+          )"
+
+          if [[ "$status_code" != "200" ]]; then
+            echo "source commit is not reachable on GitHub: ${repo}@${sha}"
+            echo "push this commit to https://github.com/${repo} before triggering the release workflow"
+            response="$(cat "$response_file" 2>/dev/null || true)"
+            if [[ -n "$response" ]]; then
+              echo "$response"
+            fi
+            exit 1
+          fi
+
+  build_zig_helpers:
+    needs: [resolve, validate_secrets, validate_source_access]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Fetch source at exact SHA
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          repo='${{ needs.resolve.outputs.source_repo }}'
+          sha='${{ needs.resolve.outputs.source_sha }}'
+          remote_url="https://github.com/${repo}.git"
+
+          rm -rf "$build_root"
+          mkdir -p "$build_root"
+
+          cd "$build_root"
+          git init
+          git remote add origin "$remote_url"
+
+          basic_auth_token="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64)"
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" fetch --depth=1 origin "$sha"
+          git checkout --force FETCH_HEAD
+          rm -rf .git
+
+      - name: Verify source layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          cd "$build_root"
+          test -f .mise.toml
+          test -f apps/desktop/package.json
+
+      - name: Setup Zig for remote shell helper build
+        # Keep this pinned instead of following the source repo's .mise.toml.
+        # The release workflow only needs a compiler compatible with the helper
+        # entrypoint used at the requested source SHA.
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build zig remote shell helper resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          cd "$build_root/apps/desktop"
+          bun run remote-shell-helper:zig:build
+
+      - name: Upload zig remote shell helper artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: remote-shell-helper-zig
+          path: ${{ github.workspace }}/build-src/apps/desktop/dist/resources/remote-shell-helper-zig-poc
+          if-no-files-found: error
+
+      - name: Cleanup source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/build-src"
+
+  build:
+    needs: [resolve, validate_secrets, validate_source_access, build_zig_helpers]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Setup mise
+        uses: jdx/mise-action@v4
+
+      - name: Fetch source at exact SHA
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $repo = '${{ needs.resolve.outputs.source_repo }}'
+          $sha = '${{ needs.resolve.outputs.source_sha }}'
+          $remoteUrl = "https://github.com/$repo.git"
+
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
+          }
+          New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+
+          Set-Location $buildRoot
+          git init
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to initialize source workspace"
+          }
+
+          git remote add origin $remoteUrl
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to configure source remote"
+          }
+
+          $basicAuthToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:SOURCE_TOKEN"))
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic $basicAuthToken" fetch --depth=1 origin $sha
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to fetch source commit from GitHub: $repo@$sha"
+          }
+
+          git checkout --force FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to checkout source commit"
+          }
+
+          Remove-Item -Recurse -Force (Join-Path $buildRoot ".git")
+
+      - name: Verify source layout
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          if (-not (Test-Path ".mise.toml")) { throw "missing .mise.toml" }
+          if (-not (Test-Path "apps/desktop/package.json")) { throw "missing apps/desktop/package.json" }
+
+      - name: Patch legacy mac signing script compatibility
+        if: ${{ matrix.target != 'win-x64' && !startsWith(matrix.target, 'linux-') }}
+        shell: bash
+        env:
+          SIGN_SCRIPT: ${{ github.workspace }}/build-src/apps/desktop/scripts/macos-signing-local.sh
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$SIGN_SCRIPT" ]]; then
+            exit 0
+          fi
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = process.env.SIGN_SCRIPT;
+          const nextLine = 'LOGIN_KEYCHAIN="${LOGIN_KEYCHAIN:-$(security default-keychain | sed \'s/^ *"//; s/"$//\')}"';
+          const current = fs.readFileSync(path, "utf8");
+          const patched = current.replace(/^LOGIN_KEYCHAIN=.*$/m, nextLine);
+          if (patched !== current) {
+            fs.writeFileSync(path, patched);
+          }
+          NODE
+
+      - name: Install node-gyp for Windows Bun install
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          $nodeGypVersion = node -p "require('./package.json').devDependencies['node-gyp']"
+          if ([string]::IsNullOrWhiteSpace($nodeGypVersion)) {
+            throw "missing node-gyp version in package.json"
+          }
+          npm install --global "node-gyp@$nodeGypVersion"
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to install global node-gyp"
+          }
+
+      - name: Install dependencies on Windows
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $env:BUN_INSTALL_CACHE_DIR = Join-Path $env:GITHUB_WORKSPACE ".bun-install-cache"
+          Set-Location $buildRoot
+          bun install --frozen-lockfile
+
+      - name: Install dependencies on macOS
+        if: ${{ startsWith(matrix.target, 'mac-') }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun install --frozen-lockfile
+
+      - name: Install dependencies on Linux
+        if: ${{ startsWith(matrix.target, 'linux-') }}
+        shell: bash
+        run: |
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun install --frozen-lockfile
+
+      - name: Download zig remote shell helper artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: remote-shell-helper-zig
+          path: ${{ runner.temp }}/remote-shell-helper-zig
+
+      - name: Update app version
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          node -e "const fs=require('fs');const path='apps/desktop/package.json';const pkg=JSON.parse(fs.readFileSync(path,'utf8'));pkg.version=process.env.RELEASE_VERSION;fs.writeFileSync(path, JSON.stringify(pkg,null,2)+'\n');"
+
+      - name: Prebuild Windows desktop app
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=win32-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=win32-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild macOS arm64 desktop app
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=darwin-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=darwin-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild macOS x64 desktop app
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=darwin-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=darwin-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild Linux x64 desktop app
+        if: ${{ matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=linux-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=linux-x64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Prebuild Linux arm64 desktop app
+        if: ${{ matrix.target == 'linux-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:build -- --target=linux-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop zclaw:package -- --target=linux-arm64
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop prebuild
+
+      - name: Inject zig remote shell helper resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const buildRoot = path.join(process.env.GITHUB_WORKSPACE, "build-src");
+          const targetDir = path.join(
+            buildRoot,
+            "apps/desktop/dist/resources/remote-shell-helper-zig-poc",
+          );
+          const artifactDir = path.join(
+            process.env.RUNNER_TEMP,
+            "remote-shell-helper-zig",
+          );
+          const sourceRootCandidates = [
+            artifactDir,
+            path.join(artifactDir, "remote-shell-helper-zig-poc"),
+          ];
+          const sourceRoot = sourceRootCandidates.find((candidate) =>
+            fs.existsSync(path.join(candidate, "manifest.json")),
+          );
+
+          if (!sourceRoot) {
+            throw new Error(
+              "missing zig remote shell helper manifest in downloaded artifact",
+            );
+          }
+
+          fs.rmSync(targetDir, { recursive: true, force: true });
+          fs.mkdirSync(targetDir, { recursive: true });
+
+          for (const entry of fs.readdirSync(sourceRoot)) {
+            fs.cpSync(path.join(sourceRoot, entry), path.join(targetDir, entry), {
+              recursive: true,
+              force: true,
+            });
+          }
+
+          const manifestPath = path.join(targetDir, "manifest.json");
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const missingTargets = (manifest.platforms ?? []).filter((target) => {
+            const binaryPath = path.join(
+              targetDir,
+              target,
+              manifest.binaryName,
+            );
+            return !fs.existsSync(binaryPath);
+          });
+
+          if (missingTargets.length > 0) {
+            throw new Error(
+              `zig remote shell helper targets missing after injection: ${missingTargets.join(", ")}`,
+            );
+          }
+
+          console.log(
+            `[zig-helper] injected ${manifest.platforms.length} targets into ${targetDir}`,
+          );
+          console.log(
+            `[zig-helper] targets: ${manifest.platforms.join(", ")}`,
+          );
+          NODE
+
+      - name: Build macOS arm64 release
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8_CONTENT: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cert_path="${RUNNER_TEMP}/codebay-macos-signing-arm64.p12"
+          notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-arm64.p8"
+          keychain_path="${RUNNER_TEMP}/codebay-signing-arm64.keychain-db"
+          keychain_password="actions"
+
+          umask 077
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+          cat > "$notary_key_path" <<EOF
+          $APPLE_NOTARIZATION_KEY_P8_CONTENT
+          EOF
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -s "$keychain_path" $(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+          security default-keychain -s "$keychain_path"
+          security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
+
+          CSC_NAME="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"Developer ID Application: \(.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$CSC_NAME" ]]; then
+            echo "failed to resolve Developer ID Application identity from $keychain_path"
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
+          export LOGIN_KEYCHAIN="$keychain_path"
+          export CSC_NAME
+          export CSC_KEYCHAIN="$keychain_path"
+          export APPLE_CERTIFICATE_P12="$cert_path"
+          export MAC_CERTIFICATE="$cert_path"
+          export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
+          export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+          export APPLE_API_KEY="$notary_key_path"
+          export APPLE_API_KEY_ID="$APPLE_NOTARIZATION_KEY_ID"
+          export APPLE_API_ISSUER="$APPLE_NOTARIZATION_ISSUER_ID"
+
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --arm64
+
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name "Codebay-*.dmg" | grep "arm64" | head -n 1)"
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing arm64 dmg in release output"
+            exit 1
+          }
+          codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH" --key "$notary_key_path" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
+
+      - name: Verify macOS arm64 signatures
+        if: ${{ matrix.target == 'mac-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          APP_PATH="$(find "$BUILD_ROOT/apps/desktop/release/mac-arm64" -maxdepth 1 -name 'Codebay.app' -print -quit)"
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name 'Codebay-*.dmg' | grep 'arm64' | head -n 1)"
+
+          [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || {
+            echo "missing signed app bundle in release/mac-arm64"
+            exit 1
+          }
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing arm64 dmg in release output"
+            exit 1
+          }
+
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 | tee /tmp/codebay-arm64-app-sign.txt
+          codesign -dv --verbose=4 "$DMG_PATH" 2>&1 | tee /tmp/codebay-arm64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/codebay-arm64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/codebay-arm64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/codebay-arm64-app-sign.txt
+
+          spctl -a -vvv "$APP_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          if ! spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH"; then
+            spctl -a -vvv -t install --context context:primary-signature "$DMG_PATH"
+          fi
+
+      - name: Build macOS x64 release
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8_CONTENT: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cert_path="${RUNNER_TEMP}/codebay-macos-signing-x64.p12"
+          notary_key_path="${RUNNER_TEMP}/codebay-macos-notary-x64.p8"
+          keychain_path="${RUNNER_TEMP}/codebay-signing-x64.keychain-db"
+          keychain_password="actions"
+
+          umask 077
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+          cat > "$notary_key_path" <<EOF
+          $APPLE_NOTARIZATION_KEY_P8_CONTENT
+          EOF
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -s "$keychain_path" $(security list-keychains | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g')
+          security default-keychain -s "$keychain_path"
+          security import "$cert_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path" > /dev/null
+
+          CSC_NAME="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"Developer ID Application: \(.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$CSC_NAME" ]]; then
+            echo "failed to resolve Developer ID Application identity from $keychain_path"
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
+          export LOGIN_KEYCHAIN="$keychain_path"
+          export CSC_NAME
+          export CSC_KEYCHAIN="$keychain_path"
+          export APPLE_CERTIFICATE_P12="$cert_path"
+          export MAC_CERTIFICATE="$cert_path"
+          export MAC_CERTIFICATE_PASSWORD="$APPLE_CERTIFICATE_PASSWORD"
+          export APPLE_NOTARIZATION_KEY_P8="$notary_key_path"
+          export APPLE_API_KEY="$notary_key_path"
+          export APPLE_API_KEY_ID="$APPLE_NOTARIZATION_KEY_ID"
+          export APPLE_API_ISSUER="$APPLE_NOTARIZATION_ISSUER_ID"
+
+          cleanup_codebay_mounts() {
+            hdiutil info || true
+            while IFS= read -r dev; do
+              [[ -n "$dev" ]] || continue
+              hdiutil detach "/dev/$dev" -force || true
+            done < <(
+              hdiutil info \
+                | awk '/\/Volumes\/Codebay / {print prev} {prev=$1}' \
+                | sed 's#/dev/##'
+            )
+          }
+
+          is_retryable_apple_failure() {
+            local log_path="$1"
+            grep -Fq \
+              -e "The timestamp service is not available." \
+              -e "Failed to notarize via notarytool." \
+              -e "The request timed out." \
+              -e "NSURLErrorDomain Code=-1001" \
+              "$log_path"
+          }
+
+          run_retryable_apple_command() {
+            local log_slug="$1"
+            local label="$2"
+            local max_attempts="$3"
+            shift 3
+
+            local attempt=1
+            local sleep_seconds=15
+            local log_path status
+
+            while true; do
+              log_path="${RUNNER_TEMP}/${log_slug}-attempt-${attempt}.log"
+              echo "::notice title=${label}::attempt ${attempt}/${max_attempts}"
+
+              set +e
+              "$@" 2>&1 | tee "$log_path"
+              status=${PIPESTATUS[0]}
+              set -e
+
+              if [[ "$status" -eq 0 ]]; then
+                return 0
+              fi
+
+              if ! is_retryable_apple_failure "$log_path"; then
+                echo "::error title=${label}::non-retryable failure detected on attempt ${attempt}/${max_attempts}"
+                return "$status"
+              fi
+
+              if [[ "$attempt" -ge "$max_attempts" ]]; then
+                echo "::error title=${label}::Apple signing/notary services remained unavailable after ${max_attempts} attempts"
+                return "$status"
+              fi
+
+              cleanup_codebay_mounts
+              echo "::warning title=${label} retry::retryable Apple signing/notary failure on attempt ${attempt}/${max_attempts}; sleeping ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+              sleep_seconds=$((sleep_seconds * 2))
+            done
+          }
+
+          cd "$BUILD_ROOT"
+          run_retryable_apple_command \
+            "codebay-macos-x64-build" \
+            "Build macOS x64 release" \
+            5 \
+            bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --mac --x64
+
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name "Codebay-*.dmg" | grep -Ev "arm64|universal" | head -n 1)"
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing x64 dmg in release output"
+            exit 1
+          }
+          run_retryable_apple_command \
+            "codebay-macos-x64-dmg-codesign" \
+            "Sign macOS x64 dmg" \
+            3 \
+            codesign --force --sign "$CSC_NAME" --keychain "$keychain_path" --timestamp "$DMG_PATH"
+          run_retryable_apple_command \
+            "codebay-macos-x64-dmg-notary" \
+            "Notarize macOS x64 dmg" \
+            3 \
+            xcrun notarytool submit "$DMG_PATH" --key "$notary_key_path" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID" --wait
+          run_retryable_apple_command \
+            "codebay-macos-x64-dmg-staple" \
+            "Staple macOS x64 dmg" \
+            3 \
+            xcrun stapler staple "$DMG_PATH"
+
+      - name: Verify macOS x64 signatures
+        if: ${{ matrix.target == 'mac-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          APP_PATH="$(find "$BUILD_ROOT/apps/desktop/release/mac" -maxdepth 1 -name 'Codebay.app' -print -quit)"
+          DMG_PATH="$(find "$BUILD_ROOT/apps/desktop/release" -maxdepth 1 -name 'Codebay-*.dmg' | grep -v 'arm64' | head -n 1)"
+
+          [[ -n "$APP_PATH" && -d "$APP_PATH" ]] || {
+            echo "missing signed app bundle in release/mac"
+            exit 1
+          }
+          [[ -n "$DMG_PATH" && -f "$DMG_PATH" ]] || {
+            echo "missing x64 dmg in release output"
+            exit 1
+          }
+
+          codesign -dv --verbose=4 "$APP_PATH" 2>&1 | tee /tmp/codebay-x64-app-sign.txt
+          codesign -dv --verbose=4 "$DMG_PATH" 2>&1 | tee /tmp/codebay-x64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/codebay-x64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/codebay-x64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/codebay-x64-app-sign.txt
+
+          spctl -a -vvv "$APP_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          if ! spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH"; then
+            spctl -a -vvv -t install --context context:primary-signature "$DMG_PATH"
+          fi
+
+      - name: Build Linux x64 release
+        if: ${{ matrix.target == 'linux-x64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --linux --x64
+
+      - name: Build Linux arm64 release
+        if: ${{ matrix.target == 'linux-arm64' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_ROOT="${GITHUB_WORKSPACE}/build-src"
+          cd "$BUILD_ROOT"
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --linux --arm64
+
+      - name: Build Windows release
+        if: ${{ matrix.target == 'win-x64' }}
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          Set-Location $buildRoot
+          bun x cross-env CODEBAY_ENABLE_AUTO_UPDATES=1 bun run --cwd apps/desktop build:ci -- --win --x64
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          $releaseDir = Join-Path $buildRoot "apps/desktop/release"
+          if (-not (Test-Path $releaseDir)) { throw "missing release dir: $releaseDir" }
+
+          $uploadDir = Join-Path $env:RUNNER_TEMP (Join-Path "release-upload" "${{ matrix.target }}")
+          if (Test-Path $uploadDir) {
+            Remove-Item -Recurse -Force $uploadDir
+          }
+          New-Item -ItemType Directory -Force -Path $uploadDir | Out-Null
+
+          $target = "${{ matrix.target }}"
+          if ($target -like "linux-*") {
+            $allowedExtensions = @(".AppImage", ".deb")
+          } else {
+            $allowedExtensions = @(".blockmap", ".dmg", ".exe", ".yml", ".zip", ".7z")
+          }
+          $files = Get-ChildItem -Path $releaseDir -File |
+            Where-Object { $allowedExtensions -contains $_.Extension } |
+            Select-Object -ExpandProperty FullName
+
+          if (-not $files -or $files.Count -eq 0) {
+            throw "no release assets found"
+          }
+
+          foreach ($file in $files) {
+            Copy-Item -Path $file -Destination (Join-Path $uploadDir (Split-Path $file -Leaf)) -Force
+          }
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-upload/${{ matrix.target }}
+          if-no-files-found: error
+
+      - name: Cleanup source
+        if: always()
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src"
+          if (Test-Path $buildRoot) {
+            Remove-Item -Recurse -Force $buildRoot
+          }
+
+  publish_release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v5
+
+      - name: Ensure release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$release_repo" --title "$tag" --notes "Automated release for $tag"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-artifacts
+
+      - name: Download existing mac manifests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          existing_dir="${RUNNER_TEMP}/existing-release"
+          mkdir -p "$existing_dir"
+          gh release download "$tag" \
+            --repo "$release_repo" \
+            --dir "$existing_dir" \
+            --pattern 'latest-mac-arm64.yml' \
+            --pattern 'latest-mac-x64.yml' || true
+
+      - name: Prepare merged release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-codebay-release-assets.mjs \
+            "${RUNNER_TEMP}/release-artifacts" \
+            "${RUNNER_TEMP}/release-publish" \
+            "${RUNNER_TEMP}/existing-release"
+
+      - name: Delete stale assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          legacy_assets=(
+            "builder-debug.yml"
+            "Codebay.exe"
+            "elevate.exe"
+            "zclaw.exe"
+          )
+
+          for asset_name in "${legacy_assets[@]}"; do
+            gh release delete-asset "$tag" "$asset_name" --repo "$release_repo" --yes >/dev/null 2>&1 || true
+          done
+
+          mapfile -t current_linux_assets < <(
+            find "${RUNNER_TEMP}/release-publish" -maxdepth 1 -type f \
+              \( -name '*.AppImage' -o -name '*.deb' \) \
+              -printf '%f\n' | sort
+          )
+
+          if ((${#current_linux_assets[@]} > 0)); then
+            mapfile -t existing_assets < <(
+              gh release view "$tag" --repo "$release_repo" --json assets --jq '.assets[].name'
+            )
+
+            for asset_name in "${existing_assets[@]}"; do
+              case "$asset_name" in
+                *.AppImage|*.deb)
+                  keep_asset=0
+                  for current_asset in "${current_linux_assets[@]}"; do
+                    if [[ "$asset_name" == "$current_asset" ]]; then
+                      keep_asset=1
+                      break
+                    fi
+                  done
+
+                  if [[ "$keep_asset" -eq 0 ]]; then
+                    gh release delete-asset "$tag" "$asset_name" --repo "$release_repo" --yes >/dev/null 2>&1 || true
+                  fi
+                  ;;
+              esac
+            done
+          fi
+
+      - name: Upload to codebay-releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "latest" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          while IFS= read -r -d '' file; do
+            gh release upload "$tag" "$file" --repo "$release_repo" --clobber
+          done < <(find "${RUNNER_TEMP}/release-publish" -maxdepth 1 -type f -print0 | sort -z)
