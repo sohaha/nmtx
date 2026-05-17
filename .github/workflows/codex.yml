@@ -1327,17 +1327,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The ubuntu-24.04-arm hosted runner is relatively constrained; rustc
-          # parallelism can OOM/kill the runner and surface as "lost communication".
+          # aarch64 arm runners are memory-constrained; serialise and rely on
+          # swap (enabled in a later step) to survive fat-LTO linking.
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
           echo "MALLOC_ARENA_MAX=2" >> "$GITHUB_ENV"
-          # If upstream enables LTO by default, overriding it helps cut peak
-          # link memory and improves runner stability.
-          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
           # Reduce peak memory pressure for native GNU targets only. musl uses
           # target-specific rustflags above so host build scripts are not linked
           # with the musl/linker-wrapper configuration.
@@ -1355,21 +1355,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # x86_64 hosted runners can also OOM during linking. Keep the
-          # GNU fallback conservative, but preserve LTO for musl release binaries:
-          # disabling LTO made @sohaha/zcodex-linux-x64 grow by about 48 MiB.
-          if [[ "${TARGET}" == "x86_64-unknown-linux-musl" ]]; then
-            echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
-          else
-            echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4" >> "$GITHUB_ENV"
-            echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
-          fi
+          # Both musl and GNU targets use fat LTO for smallest binaries.
+          # Swap is enabled in a later step to handle the higher link-time
+          # memory requirements.
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
           if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
             extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
             if [[ -n "${RUSTFLAGS:-}" ]]; then
@@ -1391,6 +1385,7 @@ jobs:
           "CARGO_PROFILE_RELEASE_STRIP=symbols" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Enabled fat LTO with serialized jobs for aarch64 Windows cross-compile"
 
       - name: Reduce Rust build memory on aarch64 macOS
@@ -1406,6 +1401,28 @@ jobs:
           echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+
+      - name: Optimise release profile on x86_64 macOS
+        if: ${{ env.TARGET == 'x86_64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
+
+      - name: Optimise release profile on x86_64 Windows
+        if: ${{ env.TARGET == 'x86_64-pc-windows-msvc' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CARGO_PROFILE_RELEASE_LTO=fat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_STRIP=symbols" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Enable swap on Linux runner
         if: ${{ runner.os == 'Linux' }}
