@@ -46,13 +46,13 @@ name: Build Codex Release
       enable_posthog_analytics:
         required: false
         type: boolean
-        default: false
-        description: Enable optional PostHog analytics HTTP client dependencies in release binaries.
+        default: true
+        description: Enable PostHog analytics HTTP client dependencies in release binaries.
       enable_otel:
         required: false
         type: boolean
         default: false
-        description: Enable Codex OpenTelemetry traffic in release binaries.
+        description: Compile upstream Codex OpenTelemetry support into release binaries.
 
 permissions:
   contents: read
@@ -100,7 +100,7 @@ jobs:
             publish_mode="${{ github.event.client_payload.publish_mode || 'full' }}"
             enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
             enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
-            enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'false' }}"
+            enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'true' }}"
             enable_otel="${{ github.event.client_payload.enable_otel || 'false' }}"
           else
             version="${{ inputs.version }}"
