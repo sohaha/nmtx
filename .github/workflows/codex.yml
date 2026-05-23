@@ -998,14 +998,29 @@ jobs:
 
           path = Path("build-src/codex-rs/core/src/unified_exec/process_manager.rs")
           text = path.read_text(encoding="utf-8")
-          old = """                sandbox_permissions: if request.additional_permissions_preapproved {
-                    crate::sandboxing::SandboxPermissions::UseDefault
-                } else {
-                    request.sandbox_permissions
-                },
-"""
-          new = """                sandbox_permissions: effective_sandbox_permissions(request),
-"""
+          old = "\n".join([
+              "                sandbox_permissions: if request.additional_permissions_preapproved {",
+              "                    crate::sandboxing::SandboxPermissions::UseDefault",
+              "                } else {",
+              "                    request.sandbox_permissions",
+              "                },",
+          ]) + "\n"
+          new = "\n".join([
+              "                sandbox_permissions: {",
+              "                    #[cfg(unix)]",
+              "                    {",
+              "                        if request.additional_permissions_preapproved {",
+              "                            crate::sandboxing::SandboxPermissions::UseDefault",
+              "                        } else {",
+              "                            request.sandbox_permissions",
+              "                        }",
+              "                    }",
+              "                    #[cfg(not(unix))]",
+              "                    {",
+              "                        request.sandbox_permissions",
+              "                    }",
+              "                },",
+          ]) + "\n"
           if old in text:
               path.write_text(text.replace(old, new), encoding="utf-8")
               print("patched Unix-only additional permissions preapproval")
