@@ -22,8 +22,8 @@ name: Build Codex Release
       targets:
         required: false
         type: string
-        default: x86_64-unknown-linux-gnu
-        description: Optional comma-separated targets. Defaults to the fastest smoke target for manual tests. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples. Full releases that publish npm are auto-expanded to all targets.
+        default: all
+        description: Optional comma-separated targets. Defaults to all release targets. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
       release_repo:
         required: true
         type: string
@@ -31,7 +31,7 @@ name: Build Codex Release
       publish_mode:
         required: false
         type: string
-        default: build-only
+        default: full
         description: Release mode. Use build-only for fast smoke tests, full for build+release, or npm-only to only publish npm from an existing GitHub release.
       enable_aws_auth:
         required: false
@@ -51,14 +51,14 @@ name: Build Codex Release
       enable_otel:
         required: false
         type: boolean
-        default: true
+        default: false
         description: Enable Codex OpenTelemetry traffic in release binaries.
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.publish_mode || github.event.client_payload.publish_mode || 'build-only' }}-${{ inputs.source_ref || github.event.client_payload.source_ref || github.ref_name || github.run_id }}
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.publish_mode || github.event.client_payload.publish_mode || 'full' }}-${{ inputs.source_ref || github.event.client_payload.source_ref || github.ref_name || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -101,7 +101,7 @@ jobs:
             enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
             enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
             enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'false' }}"
-            enable_otel="${{ github.event.client_payload.enable_otel || 'true' }}"
+            enable_otel="${{ github.event.client_payload.enable_otel || 'false' }}"
           else
             version="${{ inputs.version }}"
             source_ref="${{ inputs.source_ref }}"
