@@ -989,6 +989,32 @@ jobs:
           EOF
           echo "rewrote update_action.rs with Windows-compatible fixed content"
 
+      - name: Patch Unix-only additional permissions preapproval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build-src/codex-rs/core/src/unified_exec/process_manager.rs")
+          text = path.read_text(encoding="utf-8")
+          old = """                sandbox_permissions: if request.additional_permissions_preapproved {
+                    crate::sandboxing::SandboxPermissions::UseDefault
+                } else {
+                    request.sandbox_permissions
+                },
+"""
+          new = """                sandbox_permissions: effective_sandbox_permissions(request),
+"""
+          if old in text:
+              path.write_text(text.replace(old, new), encoding="utf-8")
+              print("patched Unix-only additional permissions preapproval")
+          elif new in text:
+              print("Unix-only additional permissions preapproval already patched")
+          else:
+              raise SystemExit("target block not found in process_manager.rs")
+          PY
+
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -1553,16 +1579,25 @@ jobs:
 
           if ($featureArgs.Count -gt 0) {
             cargo build --target $env:TARGET --release --timings @featureArgs --bin codex
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
             cargo build --target $env:TARGET --release --timings `
               --bin codex-responses-api-proxy `
               --bin codex-windows-sandbox-setup `
               --bin codex-command-runner
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
           } else {
             cargo build --target $env:TARGET --release --timings `
               --bin codex `
               --bin codex-responses-api-proxy `
               --bin codex-windows-sandbox-setup `
               --bin codex-command-runner
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
           }
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
