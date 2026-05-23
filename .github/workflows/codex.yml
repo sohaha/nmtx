@@ -1308,7 +1308,6 @@ jobs:
           archive_path="${binding_dir}/librusty_v8_release_${TARGET}.a.gz"
           binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
           checksums_path="${binding_dir}/rusty_v8_release_${TARGET}.sha256"
-          checksums_source="${GITHUB_WORKSPACE}/build-src/third_party/v8/rusty_v8_${version//./_}.sha256"
           mkdir -p "${binding_dir}"
 
           curl -fsSL \
@@ -1326,10 +1325,15 @@ jobs:
             "${base_url}/src_binding_release_${TARGET}.rs" \
             -o "${binding_path}"
 
-          grep -E "  (librusty_v8_release_${TARGET}[.]a[.]gz|src_binding_release_${TARGET}[.]rs)$" \
-            "${checksums_source}" > "${checksums_path}"
+          curl -fsSL \
+            --retry 5 \
+            --retry-connrefused \
+            --retry-delay 2 \
+            --max-time 120 \
+            "${base_url}/rusty_v8_release_${TARGET}.sha256" \
+            -o "${checksums_path}"
           if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
-            echo "expected exactly two checksums for ${TARGET} in ${checksums_source}" >&2
+            echo "expected exactly two checksums for ${TARGET} from ${base_url}" >&2
             exit 1
           fi
 
