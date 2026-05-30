@@ -59,7 +59,7 @@ env:
 
 jobs:
   resolve:
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       source_repo: ${{ steps.payload.outputs.source_repo }}
       source_sha: ${{ steps.payload.outputs.source_sha }}
@@ -167,10 +167,12 @@ jobs:
               | map({
                   target: .,
                   runner: (
-                    if . == "linux-x64" then "namespace-profile-32x64-ubuntu-2004"
-                    elif . == "linux-arm64" then "namespace-profile-8x32-ubuntu-2004-arm-m4"
-                    elif . == "mac-arm64" or . == "mac-x64" then "namespace-profile-mac-large"
-                    elif . == "win-x64" or . == "win-arm64" then "self-32vcpu-windows-2022"
+                    if . == "linux-x64" then "ubuntu-24.04"
+                    elif . == "linux-arm64" then "ubuntu-24.04-arm"
+                    elif . == "mac-arm64" then "macos-latest"
+                    elif . == "mac-x64" then "macos-15-intel"
+                    elif . == "win-x64" then "windows-latest"
+                    elif . == "win-arm64" then "windows-11-arm"
                     else error("unsupported target")
                     end
                   )
@@ -182,8 +184,52 @@ jobs:
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
-  build:
+  validate_secrets:
     needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release token
+        shell: bash
+        env:
+          ZED_RELEASE_WRITE_TOKEN: ${{ secrets.ZED_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${ZED_RELEASE_WRITE_TOKEN:-}" ]] || {
+            echo "missing required secret: ZED_RELEASE_WRITE_TOKEN"
+            exit 1
+          }
+
+      - name: Validate macOS signing secrets
+        if: ${{ contains(needs.resolve.outputs.targets, 'mac-arm64') || contains(needs.resolve.outputs.targets, 'mac-x64') }}
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            MACOS_CERTIFICATE \
+            MACOS_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+  build:
+    needs:
+      - resolve
+      - validate_secrets
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -284,12 +330,156 @@ jobs:
       - name: Build macOS arm64 release
         if: matrix.target == 'mac-arm64'
         shell: bash
-        run: ./script/bundle-mac aarch64-apple-darwin
+        run: |
+          set -euo pipefail
+
+          is_retryable_apple_failure() {
+            local log_path="$1"
+            grep -Fq \
+              -e "The timestamp service is not available." \
+              -e "Failed to notarize via notarytool." \
+              -e "The request timed out." \
+              -e "NSURLErrorDomain Code=-1001" \
+              "$log_path"
+          }
+
+          run_retryable_apple_build() {
+            local log_slug="$1"
+            local target_triple="$2"
+            local max_attempts="${3:-3}"
+            local attempt=1
+            local sleep_seconds=20
+            local log_path status
+
+            while true; do
+              log_path="${RUNNER_TEMP}/${log_slug}-attempt-${attempt}.log"
+              echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
+
+              set +e
+              ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              status=${PIPESTATUS[0]}
+              set -e
+
+              if [[ "$status" -eq 0 ]]; then
+                return 0
+              fi
+
+              if ! is_retryable_apple_failure "$log_path"; then
+                echo "::error title=Build macOS::non-retryable failure on attempt ${attempt}/${max_attempts}"
+                return "$status"
+              fi
+
+              if [[ "$attempt" -ge "$max_attempts" ]]; then
+                echo "::error title=Build macOS::Apple signing/notary services remained unavailable after ${max_attempts} attempts"
+                return "$status"
+              fi
+
+              echo "::warning title=Build macOS retry::retryable Apple failure on attempt ${attempt}/${max_attempts}; sleeping ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+              sleep_seconds=$((sleep_seconds * 2))
+            done
+          }
+
+          run_retryable_apple_build "zed-macos-arm64-build" "aarch64-apple-darwin" 4
 
       - name: Build macOS x64 release
         if: matrix.target == 'mac-x64'
         shell: bash
-        run: ./script/bundle-mac x86_64-apple-darwin
+        run: |
+          set -euo pipefail
+
+          is_retryable_apple_failure() {
+            local log_path="$1"
+            grep -Fq \
+              -e "The timestamp service is not available." \
+              -e "Failed to notarize via notarytool." \
+              -e "The request timed out." \
+              -e "NSURLErrorDomain Code=-1001" \
+              "$log_path"
+          }
+
+          run_retryable_apple_build() {
+            local log_slug="$1"
+            local target_triple="$2"
+            local max_attempts="${3:-3}"
+            local attempt=1
+            local sleep_seconds=20
+            local log_path status
+
+            while true; do
+              log_path="${RUNNER_TEMP}/${log_slug}-attempt-${attempt}.log"
+              echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
+
+              set +e
+              ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              status=${PIPESTATUS[0]}
+              set -e
+
+              if [[ "$status" -eq 0 ]]; then
+                return 0
+              fi
+
+              if ! is_retryable_apple_failure "$log_path"; then
+                echo "::error title=Build macOS::non-retryable failure on attempt ${attempt}/${max_attempts}"
+                return "$status"
+              fi
+
+              if [[ "$attempt" -ge "$max_attempts" ]]; then
+                echo "::error title=Build macOS::Apple signing/notary services remained unavailable after ${max_attempts} attempts"
+                return "$status"
+              fi
+
+              echo "::warning title=Build macOS retry::retryable Apple failure on attempt ${attempt}/${max_attempts}; sleeping ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+              sleep_seconds=$((sleep_seconds * 2))
+            done
+          }
+
+          run_retryable_apple_build "zed-macos-x64-build" "x86_64-apple-darwin" 4
+
+      - name: Verify macOS arm64 signatures
+        if: matrix.target == 'mac-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="target/aarch64-apple-darwin/release/bundle/osx/Zed.app"
+          dmg_path="target/aarch64-apple-darwin/release/Zed-aarch64.dmg"
+
+          [[ -d "$app_path" ]] || { echo "missing app bundle: $app_path"; exit 1; }
+          [[ -f "$dmg_path" ]] || { echo "missing dmg: $dmg_path"; exit 1; }
+
+          codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-arm64-app-sign.txt
+          codesign -dv --verbose=4 "$dmg_path" 2>&1 | tee /tmp/zed-mac-arm64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/zed-mac-arm64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/zed-mac-arm64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/zed-mac-arm64-app-sign.txt
+
+          spctl -a -vvv "$app_path"
+          xcrun stapler validate "$dmg_path"
+
+      - name: Verify macOS x64 signatures
+        if: matrix.target == 'mac-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="target/x86_64-apple-darwin/release/bundle/osx/Zed.app"
+          dmg_path="target/x86_64-apple-darwin/release/Zed-x86_64.dmg"
+
+          [[ -d "$app_path" ]] || { echo "missing app bundle: $app_path"; exit 1; }
+          [[ -f "$dmg_path" ]] || { echo "missing dmg: $dmg_path"; exit 1; }
+
+          codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-x64-app-sign.txt
+          codesign -dv --verbose=4 "$dmg_path" 2>&1 | tee /tmp/zed-mac-x64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/zed-mac-x64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/zed-mac-x64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/zed-mac-x64-app-sign.txt
+
+          spctl -a -vvv "$app_path"
+          xcrun stapler validate "$dmg_path"
 
       - name: Build Windows arm64 release
         if: matrix.target == 'win-arm64'
@@ -400,7 +590,7 @@ jobs:
     needs:
       - resolve
       - build
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
