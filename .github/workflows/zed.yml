@@ -191,13 +191,20 @@ jobs:
       - name: Validate release token
         shell: bash
         env:
+          CODEBAY_SOURCE_READ_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
           CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "${CODEBAY_RELEASE_WRITE_TOKEN:-}" ]] || {
-            echo "missing required secret: CODEBAY_RELEASE_WRITE_TOKEN"
+          missing=()
+          for var in CODEBAY_SOURCE_READ_TOKEN CODEBAY_RELEASE_WRITE_TOKEN; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for release:"
+            printf '  - %s\n' "${missing[@]}"
             exit 1
-          }
+          fi
 
       - name: Validate macOS signing secrets
         if: ${{ contains(needs.resolve.outputs.targets, 'mac-arm64') || contains(needs.resolve.outputs.targets, 'mac-x64') }}
@@ -260,6 +267,7 @@ jobs:
           fetch-depth: 0
           repository: ${{ needs.resolve.outputs.source_repo }}
           ref: ${{ needs.resolve.outputs.source_sha }}
+          token: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
 
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
