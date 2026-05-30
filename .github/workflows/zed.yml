@@ -269,6 +269,26 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_sha }}
           token: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
 
+      - name: Patch missing translations crate license metadata
+        shell: pwsh
+        run: |
+          $cargoToml = "crates/translations/Cargo.toml"
+          if (-not (Test-Path $cargoToml)) {
+            exit 0
+          }
+
+          $content = Get-Content -Raw -Path $cargoToml
+          if ($content -match '(?m)^license\s*=') {
+            exit 0
+          }
+
+          $updated = $content -replace '(?m)^(edition\s*=\s*".*")\r?\n', "`$1`nlicense = `"GPL-3.0-or-later`"`n"
+          if ($updated -eq $content) {
+            throw "failed to patch missing license metadata in $cargoToml"
+          }
+
+          Set-Content -Path $cargoToml -Value $updated -NoNewline
+
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
         shell: bash
