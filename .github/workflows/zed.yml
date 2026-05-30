@@ -191,11 +191,11 @@ jobs:
       - name: Validate release token
         shell: bash
         env:
-          ZED_RELEASE_WRITE_TOKEN: ${{ secrets.ZED_RELEASE_WRITE_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "${ZED_RELEASE_WRITE_TOKEN:-}" ]] || {
-            echo "missing required secret: ZED_RELEASE_WRITE_TOKEN"
+          [[ -n "${CODEBAY_RELEASE_WRITE_TOKEN:-}" ]] || {
+            echo "missing required secret: CODEBAY_RELEASE_WRITE_TOKEN"
             exit 1
           }
 
@@ -203,18 +203,18 @@ jobs:
         if: ${{ contains(needs.resolve.outputs.targets, 'mac-arm64') || contains(needs.resolve.outputs.targets, 'mac-x64') }}
         shell: bash
         env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: |
           set -euo pipefail
           missing=()
           for var in \
-            MACOS_CERTIFICATE \
-            MACOS_CERTIFICATE_PASSWORD \
-            APPLE_NOTARIZATION_KEY \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
             APPLE_NOTARIZATION_KEY_ID \
             APPLE_NOTARIZATION_ISSUER_ID; do
             [[ -n "${!var:-}" ]] || missing+=("$var")
@@ -236,7 +236,7 @@ jobs:
       matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
     env:
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
-      APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+      APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
@@ -245,8 +245,8 @@ jobs:
       CERT_PROFILE_NAME: ${{ vars.AZURE_SIGNING_CERT_PROFILE_NAME }}
       ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       FILE_DIGEST: SHA256
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       TIMESTAMP_DIGEST: SHA256
       TIMESTAMP_SERVER: http://timestamp.acs.microsoft.com
@@ -601,7 +601,7 @@ jobs:
       - name: Publish release assets
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ZED_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
           set -euo pipefail
 
