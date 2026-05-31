@@ -550,10 +550,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/aarch64-apple-darwin/release/bundle/osx -maxdepth 1 -type d -name 'Zed*.app' | head -n 1)"
+          app_path="$(find target/aarch64-apple-darwin/release -maxdepth 3 -type d -name 'Zed*.app' | head -n 1)"
           dmg_path="$(find target/aarch64-apple-darwin/release -maxdepth 1 -type f -name 'Zed-*.dmg' | head -n 1)"
 
-          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/aarch64-apple-darwin/release/bundle/osx"; exit 1; }
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/aarch64-apple-darwin/release"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/aarch64-apple-darwin/release"; exit 1; }
 
           codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-arm64-app-sign.txt
@@ -571,10 +571,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/x86_64-apple-darwin/release/bundle/osx -maxdepth 1 -type d -name 'Zed*.app' | head -n 1)"
+          app_path="$(find target/x86_64-apple-darwin/release -maxdepth 3 -type d -name 'Zed*.app' | head -n 1)"
           dmg_path="$(find target/x86_64-apple-darwin/release -maxdepth 1 -type f -name 'Zed-*.dmg' | head -n 1)"
 
-          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/x86_64-apple-darwin/release/bundle/osx"; exit 1; }
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/x86_64-apple-darwin/release"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/x86_64-apple-darwin/release"; exit 1; }
 
           codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-x64-app-sign.txt
