@@ -54,6 +54,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TARGET_DIR: target
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   RUST_BACKTRACE: "1"
   ZED_WORKSPACE: ${{ github.workspace }}
@@ -355,6 +356,19 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Free disk space on macOS runner
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+          rm -rf ~/Library/Developer/Xcode/DerivedData/* || true
+          rm -rf ~/Library/Caches/Homebrew/* || true
+          rm -rf ~/Library/Caches/pip/* || true
+          rm -rf ~/Library/Caches/com.apple.dt.Xcode/* || true
+          rm -rf "${RUNNER_TEMP:?}/"* || true
+          df -h
+
       - name: Setup sentry-cli
         uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
         with:
@@ -363,7 +377,7 @@ jobs:
       - name: Clear target directory if large
         if: startsWith(matrix.target, 'mac-')
         shell: bash
-        run: ./script/clear-target-dir-if-larger-than 350 200
+        run: ./script/clear-target-dir-if-larger-than 80 40
 
       - name: Clear target directory if large
         if: startsWith(matrix.target, 'win-')
