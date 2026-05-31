@@ -289,6 +289,36 @@ jobs:
 
           Set-Content -Path $cargoToml -Value $updated -NoNewline
 
+      - name: Patch macOS bundle script to allow skipping license generation
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          script_path="script/bundle-mac"
+          if grep -q 'SKIP_GENERATE_LICENSES' "$script_path"; then
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("script/bundle-mac")
+          text = path.read_text()
+          old = "# Generate the licenses first, so they can be baked into the binaries\nscript/generate-licenses"
+          new = """# Generate the licenses first, so they can be baked into the binaries
+          if [[ "${SKIP_GENERATE_LICENSES:-}" == "true" ]]; then
+              echo "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+          else
+              script/generate-licenses
+          fi"""
+
+          if old not in text:
+              raise SystemExit("failed to patch script/bundle-mac license generation block")
+
+          path.write_text(text.replace(old, new))
+          PY
+
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
         shell: bash
@@ -384,7 +414,7 @@ jobs:
               echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
 
               set +e
-              ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              SKIP_GENERATE_LICENSES=true ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
               status=${PIPESTATUS[0]}
               set -e
 
@@ -440,7 +470,7 @@ jobs:
               echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
 
               set +e
-              ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              SKIP_GENERATE_LICENSES=true ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
               status=${PIPESTATUS[0]}
               set -e
 
