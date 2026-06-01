@@ -41,7 +41,7 @@ on:
       release_repo:
         required: true
         type: string
-        default: sohaha/zed-releases
+        default: sohaha/codexi-releases
 
 permissions:
   contents: read
