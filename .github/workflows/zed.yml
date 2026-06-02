@@ -323,6 +323,8 @@ jobs:
           new = """# Generate the licenses first, so they can be baked into the binaries
           if [[ "${SKIP_GENERATE_LICENSES:-}" == "true" ]]; then
               echo "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+              mkdir -p assets
+              printf "License generation skipped for this CI release build.\\n" > assets/licenses.md
           else
               script/generate-licenses
           fi"""
