@@ -1432,13 +1432,16 @@ jobs:
           echo "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
           echo "MALLOC_ARENA_MAX=2" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          # fat LTO causes OOM on aarch64 musl; use thin to reduce peak link-time memory.
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          else
+            echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          fi
           echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
-          # Reduce peak memory pressure for native GNU targets only. musl uses
-          # target-specific rustflags above so host build scripts are not linked
-          # with the musl/linker-wrapper configuration.
-          if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
+          # --no-keep-memory helps the linker trade speed for lower memory on constrained runners.
+          if [[ "${TARGET}" == *-unknown-linux-gnu || "${TARGET}" == *-unknown-linux-musl ]]; then
             extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
             if [[ -n "${RUSTFLAGS:-}" ]]; then
               extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
