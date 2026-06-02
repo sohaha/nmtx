@@ -635,6 +635,7 @@ jobs:
         env:
           CC: clang-18
           CXX: clang++-18
+          CC_x86_64_unknown_linux_musl: musl-gcc
           SKIP_GENERATE_LICENSES: "true"
         run: ./script/bundle-linux
 
@@ -644,6 +645,7 @@ jobs:
         env:
           CC: clang-18
           CXX: clang++-18
+          CC_aarch64_unknown_linux_musl: musl-gcc
           SKIP_GENERATE_LICENSES: "true"
         run: ./script/bundle-linux
 
