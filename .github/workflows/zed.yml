@@ -291,6 +291,18 @@ jobs:
 
           Set-Content -Path $cargoToml -Value $updated -NoNewline
 
+      - name: Enable Windows long paths
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" `
+            -Value 1 `
+            -PropertyType DWord `
+            -Force
+
       - name: Patch macOS bundle script to allow skipping license generation
         if: startsWith(matrix.target, 'mac-')
         shell: bash
