@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
 
           [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/zed" ]] || exit 1
-          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/zed-releases" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codexi-releases" ]] || exit 1
           [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
           [[ "${{ steps.payload.outputs.channel }}" =~ ^(stable|preview|nightly|dev)$ ]] || exit 1
