@@ -395,27 +395,28 @@ jobs:
           }
 
           $old = @'
-Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-'@
+          Push-Location
+          & "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+          Pop-Location
+          '@
 
           $new = @'
-$vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-$vsInstallPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vsInstallPath) {
-    throw "Failed to resolve Visual Studio installation path via vswhere.exe"
-}
+          $programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86")
+          $vsWhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstallPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstallPath) {
+              throw "Failed to resolve Visual Studio installation path via vswhere.exe"
+          }
 
-$vsDevShell = Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1"
-if (-not (Test-Path $vsDevShell)) {
-    throw "Launch-VsDevShell.ps1 not found at $vsDevShell"
-}
+          $vsDevShell = Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1"
+          if (-not (Test-Path $vsDevShell)) {
+              throw "Launch-VsDevShell.ps1 not found at $vsDevShell"
+          }
 
-Push-Location
-& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-'@
+          Push-Location
+          & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+          Pop-Location
+          '@
 
           if (-not $content.Contains($old)) {
             throw "failed to patch Launch-VsDevShell block in $scriptPath"
