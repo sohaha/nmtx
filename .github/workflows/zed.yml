@@ -501,7 +501,7 @@ jobs:
             $patched -notmatch 'vswhere\.exe' -or
             $patched -notmatch '\$hostArch' -or
             $patched -notmatch 'Resolve-ReleaseVersion' -or
-            $patched -notmatch '\$var -eq "RELEASE_VERSION"' -or
+            -not $patched.Contains('$var -eq "RELEASE_VERSION"') -or
             $patched -notmatch 'SKIP_GENERATE_LICENSES'
           ) {
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
