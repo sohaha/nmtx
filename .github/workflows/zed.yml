@@ -444,6 +444,7 @@ jobs:
           $content = $content -replace '(?m)^version = "[^"]+"', 'version = "${{ needs.resolve.outputs.version }}"'
           Set-Content -Path $cargoToml -Value $content -NoNewline
           Set-Content -Path crates/zed/RELEASE_CHANNEL -Value "${{ needs.resolve.outputs.channel }}"
+          $env:RELEASE_VERSION = "${{ needs.resolve.outputs.version }}"
           "RELEASE_VERSION=${{ needs.resolve.outputs.version }}" >> $env:GITHUB_ENV
 
       - name: Disable cloud and collaboration default features
@@ -486,6 +487,7 @@ jobs:
           df -h
 
       - name: Setup sentry-cli
+        if: matrix.target != 'win-arm64'
         uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
         with:
           token: ${{ secrets.SENTRY_AUTH_TOKEN }}
