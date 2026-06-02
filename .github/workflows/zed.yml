@@ -413,8 +413,10 @@ jobs:
               throw "Launch-VsDevShell.ps1 not found at $vsDevShell"
           }
 
+          $hostArch = if ($OSArchitecture -eq "aarch64") { "amd64" } else { Get-VSArch -Arch $OSArchitecture }
+
           Push-Location
-          & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+          & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch $hostArch
           Pop-Location
           '@
 
