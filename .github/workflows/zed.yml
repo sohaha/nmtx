@@ -427,6 +427,11 @@ jobs:
           $updated = $content.Replace($old, $new)
           Set-Content -Path $scriptPath -Value $updated -NoNewline
 
+          $patched = Get-Content -Raw -Path $scriptPath
+          if ($patched -notmatch 'vswhere\.exe' -or $patched -notmatch '\$hostArch') {
+            throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
+          }
+
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
         shell: bash
@@ -680,12 +685,16 @@ jobs:
         if: matrix.target == 'win-arm64'
         shell: pwsh
         working-directory: ${{ env.ZED_WORKSPACE }}
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: script/bundle-windows.ps1 -Architecture aarch64
 
       - name: Build Windows x64 release
         if: matrix.target == 'win-x64'
         shell: pwsh
         working-directory: ${{ env.ZED_WORKSPACE }}
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: script/bundle-windows.ps1 -Architecture x86_64
 
       - name: Collect release files
