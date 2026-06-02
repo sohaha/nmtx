@@ -476,6 +476,24 @@ jobs:
           }
           '@
 
+          $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
+              if (-not (Test-Path "env:$var")) {
+                  Write-Error "$var is not set"
+                  exit 1
+              }
+          }'), @'
+          foreach ($var in $requiredVars) {
+              if ($var -eq "RELEASE_VERSION" -and (Resolve-ReleaseVersion)) {
+                  continue
+              }
+
+              if (-not (Test-Path "env:$var")) {
+                  Write-Error "$var is not set"
+                  exit 1
+              }
+          }
+          '@
+
           Set-Content -Path $scriptPath -Value $updated -NoNewline
 
           $patched = Get-Content -Raw -Path $scriptPath
@@ -483,6 +501,7 @@ jobs:
             $patched -notmatch 'vswhere\.exe' -or
             $patched -notmatch '\$hostArch' -or
             $patched -notmatch 'Resolve-ReleaseVersion' -or
+            $patched -notmatch '\$var -eq "RELEASE_VERSION"' -or
             $patched -notmatch 'SKIP_GENERATE_LICENSES'
           ) {
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
