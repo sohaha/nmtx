@@ -449,7 +449,7 @@ jobs:
 
           foreach ($entry in $requiredEnvSnapshot.GetEnumerator()) {
               if ($null -ne $entry.Value) {
-                  [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+                  Set-Item -Path "env:$($entry.Key)" -Value $entry.Value
               }
           }
           '@
