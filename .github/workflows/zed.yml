@@ -390,7 +390,7 @@ jobs:
         run: |
           $scriptPath = "script/bundle-windows.ps1"
           $content = Get-Content -Raw -Path $scriptPath
-          if ($content -match 'vswhere\.exe' -and $content -match 'requiredEnvSnapshot' -and $content -match 'SKIP_GENERATE_LICENSES') {
+          if ($content -match 'vswhere\.exe' -and $content -match 'Resolve-ReleaseVersion' -and $content -match 'SKIP_GENERATE_LICENSES') {
             exit 0
           }
 
@@ -428,29 +428,38 @@ jobs:
           $updated = $updated -replace [regex]::Escape('$buildSuccess = $false'), @'
           $buildSuccess = $false
 
+          function Resolve-ReleaseVersion {
+              if (Test-Path "env:RELEASE_VERSION") {
+                  return $env:RELEASE_VERSION
+              }
+
+              $cargoToml = "crates/zed/Cargo.toml"
+              if (-not (Test-Path $cargoToml)) {
+                  throw "cannot resolve RELEASE_VERSION because $cargoToml is missing"
+              }
+
+              $versionLine = Select-String -Path $cargoToml -Pattern '(?m)^version = "([^"]+)"' | Select-Object -First 1
+              if (-not $versionLine) {
+                  throw "cannot resolve RELEASE_VERSION from $cargoToml"
+              }
+
+              $resolvedVersion = $versionLine.Matches[0].Groups[1].Value
+              Set-Item -Path env:RELEASE_VERSION -Value $resolvedVersion
+              return $resolvedVersion
+          }
+
           $requiredEnvSnapshot = @{
-              "RELEASE_VERSION" = $env:RELEASE_VERSION
-              "ZED_WORKSPACE" = $env:ZED_WORKSPACE
-              "AZURE_TENANT_ID" = $env:AZURE_TENANT_ID
-              "AZURE_CLIENT_ID" = $env:AZURE_CLIENT_ID
-              "AZURE_CLIENT_SECRET" = $env:AZURE_CLIENT_SECRET
-              "ACCOUNT_NAME" = $env:ACCOUNT_NAME
-              "CERT_PROFILE_NAME" = $env:CERT_PROFILE_NAME
-              "ENDPOINT" = $env:ENDPOINT
-              "FILE_DIGEST" = $env:FILE_DIGEST
-              "TIMESTAMP_DIGEST" = $env:TIMESTAMP_DIGEST
-              "TIMESTAMP_SERVER" = $env:TIMESTAMP_SERVER
-              "SENTRY_AUTH_TOKEN" = $env:SENTRY_AUTH_TOKEN
+              "RELEASE_VERSION" = Resolve-ReleaseVersion
           }
           '@
 
           $updated = $updated -replace [regex]::Escape('$env:RELEASE_CHANNEL = $channel'), @'
           $env:RELEASE_CHANNEL = $channel
 
+          $env:RELEASE_VERSION = Resolve-ReleaseVersion
+
           foreach ($entry in $requiredEnvSnapshot.GetEnumerator()) {
-              if ($null -ne $entry.Value) {
-                  Set-Item -Path "env:$($entry.Key)" -Value $entry.Value
-              }
+              Set-Item -Path "env:$($entry.Key)" -Value $entry.Value
           }
           '@
 
@@ -473,7 +482,7 @@ jobs:
           if (
             $patched -notmatch 'vswhere\.exe' -or
             $patched -notmatch '\$hostArch' -or
-            $patched -notmatch 'requiredEnvSnapshot' -or
+            $patched -notmatch 'Resolve-ReleaseVersion' -or
             $patched -notmatch 'SKIP_GENERATE_LICENSES'
           ) {
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
