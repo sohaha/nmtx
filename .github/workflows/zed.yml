@@ -390,7 +390,7 @@ jobs:
         run: |
           $scriptPath = "script/bundle-windows.ps1"
           $content = Get-Content -Raw -Path $scriptPath
-          if ($content -match 'vswhere\.exe') {
+          if ($content -match 'vswhere\.exe' -and $content -match 'requiredEnvSnapshot' -and $content -match 'SKIP_GENERATE_LICENSES') {
             exit 0
           }
 
@@ -425,10 +425,57 @@ jobs:
           }
 
           $updated = $content.Replace($old, $new)
+          $updated = $updated -replace [regex]::Escape('$buildSuccess = $false'), @'
+          $buildSuccess = $false
+
+          $requiredEnvSnapshot = @{
+              "RELEASE_VERSION" = $env:RELEASE_VERSION
+              "ZED_WORKSPACE" = $env:ZED_WORKSPACE
+              "AZURE_TENANT_ID" = $env:AZURE_TENANT_ID
+              "AZURE_CLIENT_ID" = $env:AZURE_CLIENT_ID
+              "AZURE_CLIENT_SECRET" = $env:AZURE_CLIENT_SECRET
+              "ACCOUNT_NAME" = $env:ACCOUNT_NAME
+              "CERT_PROFILE_NAME" = $env:CERT_PROFILE_NAME
+              "ENDPOINT" = $env:ENDPOINT
+              "FILE_DIGEST" = $env:FILE_DIGEST
+              "TIMESTAMP_DIGEST" = $env:TIMESTAMP_DIGEST
+              "TIMESTAMP_SERVER" = $env:TIMESTAMP_SERVER
+              "SENTRY_AUTH_TOKEN" = $env:SENTRY_AUTH_TOKEN
+          }
+          '@
+
+          $updated = $updated -replace [regex]::Escape('$env:RELEASE_CHANNEL = $channel'), @'
+          $env:RELEASE_CHANNEL = $channel
+
+          foreach ($entry in $requiredEnvSnapshot.GetEnumerator()) {
+              if ($null -ne $entry.Value) {
+                  [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+              }
+          }
+          '@
+
+          $updated = $updated -replace [regex]::Escape('function GenerateLicenses {
+              . $PSScriptRoot/generate-licenses.ps1
+          }'), @'
+          function GenerateLicenses {
+              if ($env:SKIP_GENERATE_LICENSES -eq "true") {
+                  Write-Output "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+                  return
+              }
+
+              . $PSScriptRoot/generate-licenses.ps1
+          }
+          '@
+
           Set-Content -Path $scriptPath -Value $updated -NoNewline
 
           $patched = Get-Content -Raw -Path $scriptPath
-          if ($patched -notmatch 'vswhere\.exe' -or $patched -notmatch '\$hostArch') {
+          if (
+            $patched -notmatch 'vswhere\.exe' -or
+            $patched -notmatch '\$hostArch' -or
+            $patched -notmatch 'requiredEnvSnapshot' -or
+            $patched -notmatch 'SKIP_GENERATE_LICENSES'
+          ) {
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
           }
 
@@ -687,6 +734,7 @@ jobs:
         working-directory: ${{ env.ZED_WORKSPACE }}
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SKIP_GENERATE_LICENSES: "true"
         run: script/bundle-windows.ps1 -Architecture aarch64
 
       - name: Build Windows x64 release
@@ -695,6 +743,7 @@ jobs:
         working-directory: ${{ env.ZED_WORKSPACE }}
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SKIP_GENERATE_LICENSES: "true"
         run: script/bundle-windows.ps1 -Architecture x86_64
 
       - name: Collect release files
