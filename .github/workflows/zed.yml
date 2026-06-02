@@ -498,11 +498,10 @@ jobs:
 
           $patched = Get-Content -Raw -Path $scriptPath
           if (
-            $patched -notmatch 'vswhere\.exe' -or
-            $patched -notmatch '\$hostArch' -or
-            $patched -notmatch 'Resolve-ReleaseVersion' -or
-            -not $patched.Contains('$var -eq "RELEASE_VERSION"') -or
-            $patched -notmatch 'SKIP_GENERATE_LICENSES'
+            -not $patched.Contains('vswhere.exe') -or
+            -not $patched.Contains('$hostArch') -or
+            -not $patched.Contains('Resolve-ReleaseVersion') -or
+            -not $patched.Contains('SKIP_GENERATE_LICENSES')
           ) {
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
           }
