@@ -573,6 +573,49 @@ jobs:
             throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
           }
 
+      - name: Patch Windows sign script to allow skipping signing
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $scriptPath = "crates/zed/resources/windows/sign.ps1"
+          $content = Get-Content -Raw -Path $scriptPath
+          if ($content -match 'Skipping signing because SKIP_WINDOWS_SIGNING=true') {
+            exit 0
+          }
+
+          $old = @'
+          $endpoint = $ENV:ENDPOINT
+          if ([string]::IsNullOrWhiteSpace($endpoint)) {
+              throw "The 'ENDPOINT' env is required."
+          }
+          $params["Endpoint"] = $endpoint
+          '@
+
+          $new = @'
+          $endpoint = $ENV:ENDPOINT
+          if ([string]::IsNullOrWhiteSpace($endpoint)) {
+              if ($env:SKIP_WINDOWS_SIGNING -eq "true") {
+                  Write-Output "Skipping signing because SKIP_WINDOWS_SIGNING=true"
+                  return
+              }
+
+              throw "The 'ENDPOINT' env is required."
+          }
+          $params["Endpoint"] = $endpoint
+          '@
+
+          if (-not $content.Contains($old)) {
+            throw "failed to patch Windows sign script in $scriptPath"
+          }
+
+          $updated = $content.Replace($old, $new)
+          Set-Content -Path $scriptPath -Value $updated -NoNewline
+
+          $patched = Get-Content -Raw -Path $scriptPath
+          if (-not $patched.Contains('Skipping signing because SKIP_WINDOWS_SIGNING=true')) {
+            throw "failed to verify patched Windows sign script in $scriptPath"
+          }
+
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
         shell: bash
