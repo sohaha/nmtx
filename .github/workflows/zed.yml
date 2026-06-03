@@ -538,7 +538,7 @@ jobs:
           $updated = $updated -replace [regex]::Escape($remoteSignOld), $remoteSignNew
 
           # Make sign.ps1 a no-op when SKIP_WINDOWS_SIGNING is set
-          $updated = $updated -replace "throw '"'"'The '"'"'ENDPOINT'"'"' env is required.'"'"'", "Write-Output '"'"'Skipping signing (SKIP_WINDOWS_SIGNING)'"'"'; return"
+          $updated = $updated -replace [regex]::Escape('throw "The ''ENDPOINT'' env is required."'), 'Write-Output "Skipping signing (SKIP_WINDOWS_SIGNING)"; return'
 
           $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
               if (-not (Test-Path "env:$var")) {
