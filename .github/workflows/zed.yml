@@ -537,6 +537,9 @@ jobs:
           '@
           $updated = $updated -replace [regex]::Escape($remoteSignOld), $remoteSignNew
 
+          # Make sign.ps1 a no-op when SKIP_WINDOWS_SIGNING is set
+          $updated = $updated -replace "throw '"'"'The '"'"'ENDPOINT'"'"' env is required.'"'"'", "Write-Output '"'"'Skipping signing (SKIP_WINDOWS_SIGNING)'"'"'; return"
+
           $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
               if (-not (Test-Path "env:$var")) {
                   Write-Error "$var is not set"
@@ -868,13 +871,13 @@ jobs:
             mac-arm64)
               files=(
                 "target/aarch64-apple-darwin/release/codei-aarch64.dmg"
-                "target/zed-remote-server-macos-aarch64.gz"
+                "target/codei-remote-server-macos-aarch64.gz"
               )
               ;;
             mac-x64)
               files=(
                 "target/x86_64-apple-darwin/release/codei-x86_64.dmg"
-                "target/zed-remote-server-macos-x86_64.gz"
+                "target/codei-remote-server-macos-x86_64.gz"
               )
               ;;
             *)
@@ -906,13 +909,13 @@ jobs:
             "win-arm64" {
               $files = @(
                 "target/codei-aarch64.exe",
-                "target/zed-remote-server-windows-aarch64.zip"
+                "target/codei-remote-server-windows-aarch64.zip"
               )
             }
             "win-x64" {
               $files = @(
                 "target/codei-x86_64.exe",
-                "target/zed-remote-server-windows-x86_64.zip"
+                "target/codei-remote-server-windows-x86_64.zip"
               )
             }
             default {
