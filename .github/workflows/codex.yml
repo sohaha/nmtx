@@ -1579,14 +1579,17 @@ jobs:
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
           else
             if [[ "${#feature_args[@]}" -gt 0 ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
             else
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
                 --bin codex \
                 --bin codex-responses-api-proxy
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
             fi
           fi
 
@@ -1627,12 +1630,20 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
+            cargo build --target $env:TARGET --release --timings --bin codex-acp
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
           } else {
             cargo build --target $env:TARGET --release --timings `
               --bin codex `
               --bin codex-responses-api-proxy `
               --bin codex-windows-sandbox-setup `
               --bin codex-command-runner
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            cargo build --target $env:TARGET --release --timings --bin codex-acp
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
@@ -1681,6 +1692,7 @@ jobs:
 
           require_max_glibc "${release_dir}/codex"
           require_max_glibc "${release_dir}/codex-responses-api-proxy"
+          require_max_glibc "${release_dir}/codex-acp"
           echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Smoke test Windows artifacts
@@ -1699,11 +1711,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "codex-responses-api-proxy.exe smoke test failed"
             }
+
+            & (Join-Path $releaseDir "codex-acp.exe") --help | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "codex-acp.exe smoke test failed"
+            }
           }
 
           foreach ($binary in @(
             "codex.exe",
             "codex-responses-api-proxy.exe",
+            "codex-acp.exe",
             "codex-windows-sandbox-setup.exe",
             "codex-command-runner.exe"
           )) {
@@ -1721,6 +1739,7 @@ jobs:
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           "${release_dir}/codex" --version
           "${release_dir}/codex-responses-api-proxy" --help >/dev/null
+          "${release_dir}/codex-acp" --help >/dev/null
 
       - name: Smoke test Linux artifacts
         if: ${{ runner.os == 'Linux' }}
@@ -1729,14 +1748,14 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           bin_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
-          for bin in codex codex-responses-api-proxy; do
+          for bin in codex codex-responses-api-proxy codex-acp; do
             binary_path="${bin_dir}/${bin}"
             file "${binary_path}"
             readelf -l "${binary_path}" | grep 'Requesting program interpreter' || true
-            if [[ "${bin}" == "codex-responses-api-proxy" ]]; then
-              "${binary_path}" --help >/dev/null
-            else
+            if [[ "${bin}" == "codex" ]]; then
               "${binary_path}" --version
+            else
+              "${binary_path}" --help >/dev/null
             fi
           done
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
@@ -1769,6 +1788,7 @@ jobs:
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           "${release_dir}/codex" --version
           "${release_dir}/codex-responses-api-proxy" --help >/dev/null
+          "${release_dir}/codex-acp" --help >/dev/null
 
       - name: Build macOS dmg
         if: ${{ runner.os == 'macOS' }}
@@ -1785,6 +1805,7 @@ jobs:
 
           codex_binary_path="${release_dir}/codex"
           proxy_binary_path="${release_dir}/codex-responses-api-proxy"
+          acp_binary_path="${release_dir}/codex-acp"
 
           [[ -f "$codex_binary_path" ]] || {
             echo "binary $codex_binary_path not found"
@@ -1794,11 +1815,16 @@ jobs:
             echo "binary $proxy_binary_path not found"
             exit 1
           }
+          [[ -f "$acp_binary_path" ]] || {
+            echo "binary $acp_binary_path not found"
+            exit 1
+          }
 
           rm -rf "$dmg_root"
           mkdir -p "$dmg_root"
           ditto "$codex_binary_path" "${dmg_root}/codex"
           ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
+          ditto "$acp_binary_path" "${dmg_root}/codex-acp"
 
           rm -f "$dmg_path" "$tmp_dmg_path"
           for attempt in 1 2 3; do
@@ -1848,7 +1874,7 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
-          for binary in codex codex-responses-api-proxy; do
+          for binary in codex codex-responses-api-proxy codex-acp; do
             codesign --verify --strict --verbose=2 "${release_dir}/${binary}"
           done
           codesign --verify --verbose=2 "${release_dir}/codex-${TARGET}.dmg"
@@ -1869,6 +1895,7 @@ jobs:
           mkdir -p "$dest"
           cp "${release_dir}/codex${ext}" "$dest/codex-${TARGET}${ext}"
           cp "${release_dir}/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          cp "${release_dir}/codex-acp${ext}" "$dest/codex-acp-${TARGET}${ext}"
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
             cp "${release_dir}/bwrap" "$dest/bwrap-${TARGET}"
           fi

@@ -149,7 +149,7 @@ runs:
         fi
 
         codex_entitlements="${GITHUB_ACTION_PATH}/codex.entitlements.plist"
-        for binary in codex codex-responses-api-proxy; do
+        for binary in codex codex-responses-api-proxy codex-acp; do
           path="${release_dir}/${binary}"
           if [[ ! -f "$path" ]]; then
             echo "Binary $path not found"
