@@ -1532,7 +1532,16 @@ jobs:
           # If the runner OOM-kills the build, GitHub often reports it as
           # "lost communication". Adding swap trades speed for stability.
           size_gb="10"
-          if [[ ! -f /swapfile ]]; then
+          desired_bytes="$((size_gb * 1024 * 1024 * 1024))"
+          current_bytes="0"
+          if [[ -f /swapfile ]]; then
+            current_bytes="$(sudo stat -c '%s' /swapfile)"
+          fi
+          if [[ ! -f /swapfile || "${current_bytes}" -lt "${desired_bytes}" ]]; then
+            if sudo swapon --show=NAME --noheadings | awk '$1 == "/swapfile" { found = 1 } END { exit(found ? 0 : 1) }'; then
+              sudo swapoff /swapfile || true
+            fi
+            sudo rm -f /swapfile
             sudo fallocate -l "${size_gb}G" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$((size_gb * 1024))"
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
