@@ -540,6 +540,20 @@ jobs:
           # Make sign.ps1 a no-op when SKIP_WINDOWS_SIGNING is set
           $updated = $updated -replace [regex]::Escape('throw "The ''ENDPOINT'' env is required."'), 'Write-Output "Skipping signing (SKIP_WINDOWS_SIGNING)"; return'
 
+          $updated = $updated -replace [regex]::Escape('    $innoArgs = @($issFilePath) + $defs
+    if($env:CI) {
+        $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
+        $innoArgs += "/sDefaultsign=`"$signTool`""
+    }'), @'
+    $innoArgs = @($issFilePath) + $defs
+    if($env:CI -and $env:SKIP_WINDOWS_SIGNING -ne "true") {
+        $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
+        $innoArgs += "/sDefaultsign=`"$signTool`""
+    } elseif ($env:CI) {
+        Write-Output "Skipping Inno Setup signing because SKIP_WINDOWS_SIGNING=true"
+    }
+          '@
+
           $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
               if (-not (Test-Path "env:$var")) {
                   Write-Error "$var is not set"
@@ -565,6 +579,7 @@ jobs:
             -not $patched.Contains('vswhere.exe') -or
             -not $patched.Contains('$hostArch') -or
             -not $patched.Contains('Resolve-ReleaseVersion') -or
+            -not $patched.Contains('Skipping Inno Setup signing because SKIP_WINDOWS_SIGNING=true') -or
             $patched.Contains("'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL'") -or
             $patched.Contains("'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET'") -or
             -not $patched.Contains('SKIP_WINDOWS_SIGNING') -or
