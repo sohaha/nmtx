@@ -523,6 +523,20 @@ jobs:
           }
           '@
 
+          $remoteSignOld = @'
+              if ($env:CI) {
+                  Write-Output "Code signing remote_server.exe"
+                  & "$innoDir\sign.ps1" $remoteServerSrc
+              }
+          '@
+          $remoteSignNew = @'
+              if ($env:CI -and $env:SKIP_WINDOWS_SIGNING -ne "true") {
+                  Write-Output "Code signing remote_server.exe"
+                  & "$innoDir\sign.ps1" $remoteServerSrc
+              }
+          '@
+          $updated = $updated -replace [regex]::Escape($remoteSignOld), $remoteSignNew
+
           $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
               if (-not (Test-Path "env:$var")) {
                   Write-Error "$var is not set"
@@ -770,8 +784,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/aarch64-apple-darwin/release -maxdepth 3 -type d -name 'Zed*.app' | head -n 1)"
-          dmg_path="$(find target/aarch64-apple-darwin/release -maxdepth 1 -type f -name 'Zed-*.dmg' | head -n 1)"
+          app_path="$(find target/aarch64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          dmg_path="$(find target/aarch64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
 
           [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/aarch64-apple-darwin/release"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/aarch64-apple-darwin/release"; exit 1; }
@@ -791,8 +805,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/x86_64-apple-darwin/release -maxdepth 3 -type d -name 'Zed*.app' | head -n 1)"
-          dmg_path="$(find target/x86_64-apple-darwin/release -maxdepth 1 -type f -name 'Zed-*.dmg' | head -n 1)"
+          app_path="$(find target/x86_64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          dmg_path="$(find target/x86_64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
 
           [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/x86_64-apple-darwin/release"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/x86_64-apple-darwin/release"; exit 1; }
@@ -853,13 +867,13 @@ jobs:
               ;;
             mac-arm64)
               files=(
-                "target/aarch64-apple-darwin/release/Zed-aarch64.dmg"
+                "target/aarch64-apple-darwin/release/codei-aarch64.dmg"
                 "target/zed-remote-server-macos-aarch64.gz"
               )
               ;;
             mac-x64)
               files=(
-                "target/x86_64-apple-darwin/release/Zed-x86_64.dmg"
+                "target/x86_64-apple-darwin/release/codei-x86_64.dmg"
                 "target/zed-remote-server-macos-x86_64.gz"
               )
               ;;
@@ -891,13 +905,13 @@ jobs:
           switch ($target) {
             "win-arm64" {
               $files = @(
-                "target/Zed-aarch64.exe",
+                "target/codei-aarch64.exe",
                 "target/zed-remote-server-windows-aarch64.zip"
               )
             }
             "win-x64" {
               $files = @(
-                "target/Zed-x86_64.exe",
+                "target/codei-x86_64.exe",
                 "target/zed-remote-server-windows-x86_64.zip"
               )
             }
