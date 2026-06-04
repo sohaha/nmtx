@@ -1889,6 +1889,42 @@ jobs:
             cp "${release_dir}/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
 
+      - name: Verify staged artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+
+          required_artifacts=(
+            "dist/${TARGET}/codex-${TARGET}${ext}"
+            "dist/${TARGET}/codex-responses-api-proxy-${TARGET}${ext}"
+            "dist/${TARGET}/codex-acp-${TARGET}${ext}"
+          )
+
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            required_artifacts+=("dist/${TARGET}/bwrap-${TARGET}")
+          fi
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            required_artifacts+=(
+              "dist/${TARGET}/codex-windows-sandbox-setup-${TARGET}.exe"
+              "dist/${TARGET}/codex-command-runner-${TARGET}.exe"
+            )
+          fi
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            required_artifacts+=("dist/${TARGET}/codex-${TARGET}.dmg")
+          fi
+
+          for artifact in "${required_artifacts[@]}"; do
+            [[ -f "${artifact}" ]] || {
+              echo "missing staged artifact: ${artifact}" >&2
+              exit 1
+            }
+          done
+
       - name: Enforce artifact size budget
         shell: bash
         run: |
