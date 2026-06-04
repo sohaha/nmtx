@@ -53,6 +53,11 @@ name: Build Codex Release
         type: boolean
         default: false
         description: Compile upstream Codex OpenTelemetry support into release binaries.
+      enable_acp:
+        required: false
+        type: boolean
+        default: false
+        description: Build and package the optional codex-acp binary.
 
 permissions:
   contents: read
@@ -85,6 +90,7 @@ jobs:
       enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}
       enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}
       enable_otel: ${{ steps.payload.outputs.enable_otel }}
+      enable_acp: ${{ steps.payload.outputs.enable_acp }}
     steps:
       - name: Resolve payload
         id: payload
@@ -102,6 +108,7 @@ jobs:
             enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
             enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'true' }}"
             enable_otel="${{ github.event.client_payload.enable_otel || 'false' }}"
+            enable_acp="${{ github.event.client_payload.enable_acp || 'false' }}"
           else
             version="${{ inputs.version }}"
             source_ref="${{ inputs.source_ref }}"
@@ -113,6 +120,7 @@ jobs:
             enable_semantic_embeddings="${{ inputs.enable_semantic_embeddings }}"
             enable_posthog_analytics="${{ inputs.enable_posthog_analytics }}"
             enable_otel="${{ inputs.enable_otel }}"
+            enable_acp="${{ inputs.enable_acp }}"
           fi
 
           source_url="https://cnb.cool/zls_nmtx/sohaha/zcodex"
@@ -147,6 +155,7 @@ jobs:
           echo "enable_semantic_embeddings=${enable_semantic_embeddings}" >> "$GITHUB_OUTPUT"
           echo "enable_posthog_analytics=${enable_posthog_analytics}" >> "$GITHUB_OUTPUT"
           echo "enable_otel=${enable_otel}" >> "$GITHUB_OUTPUT"
+          echo "enable_acp=${enable_acp}" >> "$GITHUB_OUTPUT"
           echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
 
       - name: Validate payload
@@ -522,6 +531,7 @@ jobs:
       CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS: ${{ needs.resolve.outputs.enable_semantic_embeddings }}
       CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS: ${{ needs.resolve.outputs.enable_posthog_analytics }}
       CODEX_RELEASE_ENABLE_OTEL: ${{ needs.resolve.outputs.enable_otel }}
+      CODEX_RELEASE_ENABLE_ACP: ${{ needs.resolve.outputs.enable_acp }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/build-src/codex-rs/target
 
     steps:
@@ -1588,16 +1598,22 @@ jobs:
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
-            "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+            if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+            fi
           else
             if [[ "${#feature_args[@]}" -gt 0 ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" -p codex-cli
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
-              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+              if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+                "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+              fi
             else
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" -p codex-cli
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
-              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+              if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+                "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+              fi
             fi
           fi
 
@@ -1638,9 +1654,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
-            cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
             }
           } else {
             cargo build --target $env:TARGET --release --timings -p codex-cli
@@ -1654,9 +1672,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
-            cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
             }
           }
 
@@ -1703,7 +1723,9 @@ jobs:
 
           require_max_glibc "${release_dir}/codex"
           require_max_glibc "${release_dir}/codex-responses-api-proxy"
-          require_max_glibc "${release_dir}/codex-acp"
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            require_max_glibc "${release_dir}/codex-acp"
+          fi
           echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Smoke test Windows artifacts
@@ -1723,21 +1745,27 @@ jobs:
               throw "codex-responses-api-proxy.exe smoke test failed"
             }
 
-            & (Join-Path $releaseDir "codex-acp.exe") --help | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-              throw "codex-acp.exe smoke test failed"
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              & (Join-Path $releaseDir "codex-acp.exe") --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "codex-acp.exe smoke test failed"
+              }
             }
           }
 
           foreach ($binary in @(
             "codex.exe",
             "codex-responses-api-proxy.exe",
-            "codex-acp.exe",
             "codex-windows-sandbox-setup.exe",
             "codex-command-runner.exe"
           )) {
             if (-not (Test-Path (Join-Path $releaseDir $binary))) {
               throw "missing Windows artifact: $binary"
+            }
+          }
+          if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+            if (-not (Test-Path (Join-Path $releaseDir "codex-acp.exe"))) {
+              throw "missing Windows artifact: codex-acp.exe"
             }
           }
 
@@ -1750,7 +1778,9 @@ jobs:
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           "${release_dir}/codex" --version
           "${release_dir}/codex-responses-api-proxy" --help >/dev/null
-          "${release_dir}/codex-acp" --help >/dev/null
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            "${release_dir}/codex-acp" --help >/dev/null
+          fi
 
       - name: Smoke test Linux artifacts
         if: ${{ runner.os == 'Linux' }}
@@ -1759,7 +1789,11 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           bin_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
-          for bin in codex codex-responses-api-proxy codex-acp; do
+          bins=(codex codex-responses-api-proxy)
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            bins+=(codex-acp)
+          fi
+          for bin in "${bins[@]}"; do
             binary_path="${bin_dir}/${bin}"
             file "${binary_path}"
             readelf -l "${binary_path}" | grep 'Requesting program interpreter' || true
@@ -1799,7 +1833,9 @@ jobs:
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           "${release_dir}/codex" --version
           "${release_dir}/codex-responses-api-proxy" --help >/dev/null
-          "${release_dir}/codex-acp" --help >/dev/null
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            "${release_dir}/codex-acp" --help >/dev/null
+          fi
 
       - name: Build macOS dmg
         if: ${{ runner.os == 'macOS' }}
@@ -1816,8 +1852,6 @@ jobs:
 
           codex_binary_path="${release_dir}/codex"
           proxy_binary_path="${release_dir}/codex-responses-api-proxy"
-          acp_binary_path="${release_dir}/codex-acp"
-
           [[ -f "$codex_binary_path" ]] || {
             echo "binary $codex_binary_path not found"
             exit 1
@@ -1826,16 +1860,19 @@ jobs:
             echo "binary $proxy_binary_path not found"
             exit 1
           }
-          [[ -f "$acp_binary_path" ]] || {
-            echo "binary $acp_binary_path not found"
-            exit 1
-          }
 
           rm -rf "$dmg_root"
           mkdir -p "$dmg_root"
           ditto "$codex_binary_path" "${dmg_root}/codex"
           ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
-          ditto "$acp_binary_path" "${dmg_root}/codex-acp"
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            acp_binary_path="${release_dir}/codex-acp"
+            [[ -f "$acp_binary_path" ]] || {
+              echo "binary $acp_binary_path not found"
+              exit 1
+            }
+            ditto "$acp_binary_path" "${dmg_root}/codex-acp"
+          fi
 
           rm -f "$dmg_path" "$tmp_dmg_path"
           for attempt in 1 2 3; do
@@ -1885,7 +1922,11 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
-          for binary in codex codex-responses-api-proxy codex-acp; do
+          binaries=(codex codex-responses-api-proxy)
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            binaries+=(codex-acp)
+          fi
+          for binary in "${binaries[@]}"; do
             codesign --verify --strict --verbose=2 "${release_dir}/${binary}"
           done
           codesign --verify --verbose=2 "${release_dir}/codex-${TARGET}.dmg"
@@ -1906,7 +1947,9 @@ jobs:
           mkdir -p "$dest"
           cp "${release_dir}/codex${ext}" "$dest/codex-${TARGET}${ext}"
           cp "${release_dir}/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
-          cp "${release_dir}/codex-acp${ext}" "$dest/codex-acp-${TARGET}${ext}"
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            cp "${release_dir}/codex-acp${ext}" "$dest/codex-acp-${TARGET}${ext}"
+          fi
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
             cp "${release_dir}/bwrap" "$dest/bwrap-${TARGET}"
           fi
@@ -1931,8 +1974,10 @@ jobs:
           required_artifacts=(
             "dist/${TARGET}/codex-${TARGET}${ext}"
             "dist/${TARGET}/codex-responses-api-proxy-${TARGET}${ext}"
-            "dist/${TARGET}/codex-acp-${TARGET}${ext}"
           )
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            required_artifacts+=("dist/${TARGET}/codex-acp-${TARGET}${ext}")
+          fi
 
           if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
             required_artifacts+=("dist/${TARGET}/bwrap-${TARGET}")
