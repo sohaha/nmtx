@@ -1588,17 +1588,17 @@ jobs:
             if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
-            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
+            "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
           else
             if [[ "${#feature_args[@]}" -gt 0 ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
-              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
+              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
             else
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
                 --bin codex \
                 --bin codex-responses-api-proxy
-              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-acp
+              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
             fi
           fi
 
@@ -1639,7 +1639,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
-            cargo build --target $env:TARGET --release --timings --bin codex-acp
+            cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
@@ -1652,7 +1652,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
-            cargo build --target $env:TARGET --release --timings --bin codex-acp
+            cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
