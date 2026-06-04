@@ -635,6 +635,40 @@ jobs:
             throw "failed to verify patched Windows sign script in $scriptPath"
           }
 
+      - name: Patch Windows Inno script to allow skipping signing
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $scriptPath = "crates/zed/resources/windows/zed.iss"
+          $content = Get-Content -Raw -Path $scriptPath
+          if ($content -match 'GetEnv\("SKIP_WINDOWS_SIGNING"\)') {
+            exit 0
+          }
+
+          $old = @'
+          #if GetEnv("CI") != ""
+          SignTool=Defaultsign
+          #endif
+          '@
+
+          $new = @'
+          #if GetEnv("CI") != "" && GetEnv("SKIP_WINDOWS_SIGNING") != "true"
+          SignTool=Defaultsign
+          #endif
+          '@
+
+          if (-not $content.Contains($old)) {
+            throw "failed to patch Windows Inno script in $scriptPath"
+          }
+
+          $updated = $content.Replace($old, $new)
+          Set-Content -Path $scriptPath -Value $updated -NoNewline
+
+          $patched = Get-Content -Raw -Path $scriptPath
+          if (-not $patched.Contains('GetEnv("SKIP_WINDOWS_SIGNING")')) {
+            throw "failed to verify patched Windows Inno script in $scriptPath"
+          }
+
       - name: Set release channel and version
         if: ${{ !startsWith(matrix.target, 'win-') }}
         shell: bash
