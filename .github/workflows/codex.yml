@@ -2092,6 +2092,7 @@ jobs:
       RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
       RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
       TARGETS: ${{ needs.resolve.outputs.targets }}
+      CODEX_RELEASE_ENABLE_ACP: ${{ needs.resolve.outputs.enable_acp }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
