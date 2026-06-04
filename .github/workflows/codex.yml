@@ -1595,9 +1595,8 @@ jobs:
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
               "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
             else
-              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" \
-                -p codex-cli \
-                --bin codex-responses-api-proxy
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" -p codex-cli
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
               "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
             fi
           fi
@@ -1644,8 +1643,11 @@ jobs:
               exit $LASTEXITCODE
             }
           } else {
+            cargo build --target $env:TARGET --release --timings -p codex-cli
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
             cargo build --target $env:TARGET --release --timings `
-              -p codex-cli `
               --bin codex-responses-api-proxy `
               --bin codex-windows-sandbox-setup `
               --bin codex-command-runner
