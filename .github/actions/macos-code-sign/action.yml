@@ -8,6 +8,10 @@ inputs:
   target:
     description: Rust compilation target triple (e.g. aarch64-apple-darwin).
     required: true
+  include-acp:
+    description: Whether to sign and notarize the optional codex-acp binary.
+    required: false
+    default: "false"
   sign-binaries:
     description: Whether to sign and notarize the macOS binaries.
     required: false
@@ -147,8 +151,13 @@ runs:
           keychain_args+=(--keychain "${APPLE_CODESIGN_KEYCHAIN}")
         fi
 
+        binaries=(codex codex-responses-api-proxy)
+        if [[ "${{ inputs.include-acp }}" == "true" ]]; then
+          binaries+=(codex-acp)
+        fi
+
         codex_entitlements="${GITHUB_ACTION_PATH}/codex.entitlements.plist"
-        for binary in codex codex-responses-api-proxy; do
+        for binary in "${binaries[@]}"; do
           path="${release_dir}/${binary}"
           if [[ ! -f "$path" ]]; then
             echo "Binary $path not found"
@@ -156,8 +165,8 @@ runs:
           fi
 
           extra_codesign_args=()
-          # Codex embeds V8 and needs JIT entitlement under hardened runtime.
-          if [[ "$binary" == "codex" ]]; then
+          # Codex and ACP embed V8 and need JIT entitlement under hardened runtime.
+          if [[ "$binary" == "codex" || "$binary" == "codex-acp" ]]; then
             if [[ ! -f "$codex_entitlements" ]]; then
               echo "Entitlements file $codex_entitlements not found"
               exit 1
@@ -363,8 +372,13 @@ runs:
           notarize_submission "$binary" "$archive_path" "$notary_key_path"
         }
 
-        notarize_binary "codex"
-        notarize_binary "codex-responses-api-proxy"
+        binaries=(codex codex-responses-api-proxy)
+        if [[ "${{ inputs.include-acp }}" == "true" ]]; then
+          binaries+=(codex-acp)
+        fi
+        for binary in "${binaries[@]}"; do
+          notarize_binary "$binary"
+        done
 
     - name: Sign and notarize macOS dmg
       if: ${{ inputs.sign-dmg == 'true' }}

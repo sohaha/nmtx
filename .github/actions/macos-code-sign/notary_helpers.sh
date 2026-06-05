@@ -70,6 +70,12 @@ notarize_submission() {
 
   if [[ "$status" != "Accepted" ]]; then
     echo "Notarization failed for ${label} (submission ${submission_id}, status ${status})"
+    retry_notary_command "$label notarization log" \
+      xcrun notarytool log "$submission_id" \
+        --key "$notary_key_path" \
+        --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+        --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+        --output-format json >&2 || true
     exit 1
   fi
 }
