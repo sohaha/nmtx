@@ -31,7 +31,7 @@ name: Build Codex Release
       publish_mode:
         required: false
         type: string
-        default: build-only
+        default: full
         description: Release mode. Use build-only for fast smoke tests, full for build+release, or npm-only to only publish npm from an existing GitHub release.
       enable_posthog_analytics:
         required: false
@@ -46,7 +46,7 @@ name: Build Codex Release
       enable_acp:
         required: false
         type: boolean
-        default: false
+        default: true
         description: Build and package the optional codex-acp binary.
 
 permissions:
