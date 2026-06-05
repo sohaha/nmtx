@@ -917,6 +917,7 @@ jobs:
 
               detect_update_action(
                   cfg!(target_os = "macos"),
+                  cfg!(windows),
                   &exe,
                   managed_by_npm,
                   managed_by_bun,
@@ -926,6 +927,7 @@ jobs:
           #[cfg(any(not(debug_assertions), test))]
           fn detect_update_action(
               is_macos: bool,
+              is_windows: bool,
               current_exe: &std::path::Path,
               managed_by_npm: bool,
               managed_by_bun: bool,
@@ -938,6 +940,8 @@ jobs:
                   && (current_exe.starts_with("/opt/homebrew") || current_exe.starts_with("/usr/local"))
               {
                   Some(UpdateAction::BrewUpgrade)
+              } else if is_windows {
+                  Some(UpdateAction::StandaloneWindows)
               } else {
                   None
               }
@@ -952,6 +956,7 @@ jobs:
                   assert_eq!(
                       detect_update_action(
                           /*is_macos*/ false,
+                          /*is_windows*/ false,
                           std::path::Path::new("/any/path"),
                           /*managed_by_npm*/ false,
                           /*managed_by_bun*/ false
@@ -961,6 +966,7 @@ jobs:
                   assert_eq!(
                       detect_update_action(
                           /*is_macos*/ false,
+                          /*is_windows*/ false,
                           std::path::Path::new("/any/path"),
                           /*managed_by_npm*/ true,
                           /*managed_by_bun*/ false
@@ -970,6 +976,7 @@ jobs:
                   assert_eq!(
                       detect_update_action(
                           /*is_macos*/ false,
+                          /*is_windows*/ false,
                           std::path::Path::new("/any/path"),
                           /*managed_by_npm*/ false,
                           /*managed_by_bun*/ true
@@ -979,6 +986,7 @@ jobs:
                   assert_eq!(
                       detect_update_action(
                           /*is_macos*/ true,
+                          /*is_windows*/ false,
                           std::path::Path::new("/opt/homebrew/bin/codex"),
                           /*managed_by_npm*/ false,
                           /*managed_by_bun*/ false
@@ -988,16 +996,46 @@ jobs:
                   assert_eq!(
                       detect_update_action(
                           /*is_macos*/ true,
+                          /*is_windows*/ false,
                           std::path::Path::new("/usr/local/bin/codex"),
                           /*managed_by_npm*/ false,
                           /*managed_by_bun*/ false
                       ),
                       Some(UpdateAction::BrewUpgrade)
                   );
+                  assert_eq!(
+                      detect_update_action(
+                          /*is_macos*/ false,
+                          /*is_windows*/ true,
+                          std::path::Path::new("C:/Users/test/AppData/Local/zcodex/codex.exe"),
+                          /*managed_by_npm*/ false,
+                          /*managed_by_bun*/ false
+                      ),
+                      Some(UpdateAction::StandaloneWindows)
+                  );
               }
           }
           EOF
           echo "rewrote update_action.rs with Windows-compatible fixed content"
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "tui" / "src" / "updates.rs"
+          if not path.exists():
+              print("updates source not found; skip StandaloneWindows match patch")
+              raise SystemExit(0)
+          text = path.read_text(encoding="utf-8")
+          standalone_arm = "        Some(UpdateAction::StandaloneWindows) => fetch_latest_github_release_version().await?,\n"
+          if standalone_arm in text:
+              print("updates.rs already handles StandaloneWindows")
+              raise SystemExit(0)
+          needle = "        None => fetch_latest_github_release_version().await?,\n"
+          if needle not in text:
+              raise SystemExit("failed to locate updates.rs fallback arm for StandaloneWindows patch")
+          path.write_text(text.replace(needle, standalone_arm + needle, 1), encoding="utf-8")
+          print("patched updates.rs StandaloneWindows update check")
+          PY
 
       - name: Patch Unix-only additional permissions preapproval
         shell: bash
