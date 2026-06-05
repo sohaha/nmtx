@@ -22,8 +22,8 @@ name: Build Codex Release
       targets:
         required: false
         type: string
-        default: x86_64-unknown-linux-gnu
-        description: Optional comma-separated targets. Defaults to the fastest smoke target for manual tests. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples. Full releases that publish npm are auto-expanded to all targets.
+        default: all
+        description: Optional comma-separated targets. Defaults to all release targets. Supports windows, mac, linux, all, linux-gnu, linux-musl, or explicit target triples.
       release_repo:
         required: true
         type: string
@@ -33,6 +33,16 @@ name: Build Codex Release
         type: string
         default: full
         description: Release mode. Use build-only for fast smoke tests, full for build+release, or npm-only to only publish npm from an existing GitHub release.
+      enable_aws_auth:
+        required: false
+        type: boolean
+        default: false
+        description: Enable optional AWS Bedrock/SigV4 auth dependencies in release binaries.
+      enable_semantic_embeddings:
+        required: false
+        type: boolean
+        default: false
+        description: Enable optional ztldr semantic embedding dependencies in release binaries.
       enable_posthog_analytics:
         required: false
         type: boolean
@@ -46,14 +56,14 @@ name: Build Codex Release
       enable_acp:
         required: false
         type: boolean
-        default: true
+        default: false
         description: Build and package the optional codex-acp binary.
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.publish_mode || github.event.client_payload.publish_mode || 'build-only' }}-${{ inputs.source_ref || github.event.client_payload.source_ref || github.ref_name || github.run_id }}
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.publish_mode || github.event.client_payload.publish_mode || 'full' }}-${{ inputs.source_ref || github.event.client_payload.source_ref || github.ref_name || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -72,13 +82,15 @@ jobs:
       version: ${{ steps.payload.outputs.version }}
       release_tag: ${{ steps.release.outputs.release_tag }}
       release_repo: ${{ steps.payload.outputs.release_repo }}
-      enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}
-      enable_otel: ${{ steps.payload.outputs.enable_otel }}
-      enable_acp: ${{ steps.payload.outputs.enable_acp }}
       targets: ${{ steps.targets.outputs.targets }}
       matrix: ${{ steps.targets.outputs.matrix }}
       should_publish_npm: ${{ steps.npm_publish_settings.outputs.should_publish }}
       npm_tag: ${{ steps.npm_publish_settings.outputs.npm_tag }}
+      enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}
+      enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}
+      enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}
+      enable_otel: ${{ steps.payload.outputs.enable_otel }}
+      enable_acp: ${{ steps.payload.outputs.enable_acp }}
     steps:
       - name: Resolve payload
         id: payload
@@ -92,6 +104,8 @@ jobs:
             targets_input="${{ github.event.client_payload.targets || 'all' }}"
             release_repo="${{ github.event.client_payload.release_repo || 'sohaha/zcodex' }}"
             publish_mode="${{ github.event.client_payload.publish_mode || 'full' }}"
+            enable_aws_auth="${{ github.event.client_payload.enable_aws_auth || 'false' }}"
+            enable_semantic_embeddings="${{ github.event.client_payload.enable_semantic_embeddings || 'false' }}"
             enable_posthog_analytics="${{ github.event.client_payload.enable_posthog_analytics || 'true' }}"
             enable_otel="${{ github.event.client_payload.enable_otel || 'false' }}"
             enable_acp="${{ github.event.client_payload.enable_acp || 'false' }}"
@@ -102,6 +116,8 @@ jobs:
             targets_input="${{ inputs.targets }}"
             release_repo="${{ inputs.release_repo }}"
             publish_mode="${{ inputs.publish_mode }}"
+            enable_aws_auth="${{ inputs.enable_aws_auth }}"
+            enable_semantic_embeddings="${{ inputs.enable_semantic_embeddings }}"
             enable_posthog_analytics="${{ inputs.enable_posthog_analytics }}"
             enable_otel="${{ inputs.enable_otel }}"
             enable_acp="${{ inputs.enable_acp }}"
@@ -135,6 +151,8 @@ jobs:
           echo "targets_input=${targets_input}" >> "$GITHUB_OUTPUT"
           echo "release_repo=${release_repo}" >> "$GITHUB_OUTPUT"
           echo "publish_mode=${publish_mode}" >> "$GITHUB_OUTPUT"
+          echo "enable_aws_auth=${enable_aws_auth}" >> "$GITHUB_OUTPUT"
+          echo "enable_semantic_embeddings=${enable_semantic_embeddings}" >> "$GITHUB_OUTPUT"
           echo "enable_posthog_analytics=${enable_posthog_analytics}" >> "$GITHUB_OUTPUT"
           echo "enable_otel=${enable_otel}" >> "$GITHUB_OUTPUT"
           echo "enable_acp=${enable_acp}" >> "$GITHUB_OUTPUT"
@@ -157,19 +175,38 @@ jobs:
               exit 1
               ;;
           esac
-          for value in \
-            "${{ steps.payload.outputs.enable_posthog_analytics }}" \
-            "${{ steps.payload.outputs.enable_otel }}" \
-            "${{ steps.payload.outputs.enable_acp }}"; do
-            case "$value" in
-              true|false)
-                ;;
-              *)
-                echo "boolean release flags must be true or false, got: $value"
-                exit 1
-                ;;
-            esac
-          done
+          case "${{ steps.payload.outputs.enable_aws_auth }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_aws_auth: ${{ steps.payload.outputs.enable_aws_auth }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_semantic_embeddings }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_semantic_embeddings: ${{ steps.payload.outputs.enable_semantic_embeddings }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_posthog_analytics }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_posthog_analytics: ${{ steps.payload.outputs.enable_posthog_analytics }}"
+              exit 1
+              ;;
+          esac
+          case "${{ steps.payload.outputs.enable_otel }}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported enable_otel: ${{ steps.payload.outputs.enable_otel }}"
+              exit 1
+              ;;
+          esac
 
       - name: Validate build secrets
         if: ${{ steps.payload.outputs.publish_mode != 'npm-only' }}
@@ -482,7 +519,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
@@ -490,6 +527,8 @@ jobs:
       SOURCE_URL: ${{ needs.resolve.outputs.source_url }}
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      CODEX_RELEASE_ENABLE_AWS_AUTH: ${{ needs.resolve.outputs.enable_aws_auth }}
+      CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS: ${{ needs.resolve.outputs.enable_semantic_embeddings }}
       CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS: ${{ needs.resolve.outputs.enable_posthog_analytics }}
       CODEX_RELEASE_ENABLE_OTEL: ${{ needs.resolve.outputs.enable_otel }}
       CODEX_RELEASE_ENABLE_ACP: ${{ needs.resolve.outputs.enable_acp }}
@@ -555,6 +594,99 @@ jobs:
           [[ -f "${build_root}/.github/scripts/install-musl-build-tools.sh" ]] || exit 1
           [[ -f "${build_root}/scripts/install/install.sh" ]] || exit 1
           [[ -f "${build_root}/scripts/install/install.ps1" ]] || exit 1
+
+      - name: Apply OTel release setting
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${CODEX_RELEASE_ENABLE_OTEL}" in
+            true|false)
+              ;;
+            *)
+              echo "unsupported CODEX_RELEASE_ENABLE_OTEL=${CODEX_RELEASE_ENABLE_OTEL}" >&2
+              exit 1
+              ;;
+          esac
+          echo "OTel Cargo feature enabled: ${CODEX_RELEASE_ENABLE_OTEL}"
+
+      - name: Patch Zig cc cache-dir handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          script = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src/.github/scripts/install-musl-build-tools.sh"
+          content = script.read_text(encoding="utf-8")
+          prefix = "set -euo pipefail\n\n"
+          if content.count(prefix) != 3:
+              raise SystemExit("unexpected musl tool script shell preamble count")
+          content = content.replace(
+              prefix,
+              "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
+              2,
+          )
+          content = content.replace(
+              'exec "${zig_bin}" cc -target "${zig_target}" "\${args[@]}"',
+              'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" cc -target "${zig_target}" "\${args[@]}"',
+              1,
+          )
+          content = content.replace(
+              'exec "${zig_bin}" c++ -target "${zig_target}" "\${args[@]}"',
+              'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" c++ -target "${zig_target}" "\${args[@]}"',
+              1,
+          )
+
+          needle = "    --target)\n      skip_next=1\n      continue\n      ;;\n"
+          replacement = (
+              "    --cache-dir)\n"
+              "      # cc-rs uses this probe flag when identifying compiler families, but\n"
+              "      # Zig 0.14 forwards it to clang where it is rejected.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --cache-dir=*)\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --target)\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
+          count = content.count(needle)
+          if count != 1:
+              raise SystemExit(f"expected one Zig cc target-filter block, found {count}")
+          content = content.replace(needle, replacement, 1)
+          needle_cxx = (
+              "    --target)\n"
+              "      # Drop explicit --target and its value: we always pass zig's -target below.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
+          replacement_cxx = (
+              "    --cache-dir)\n"
+              "      # cc-rs uses this probe flag when identifying compiler families, but\n"
+              "      # Zig 0.14 forwards it to clang where it is rejected.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --cache-dir=*)\n"
+              "      continue\n"
+              "      ;;\n"
+              "    --target)\n"
+              "      # Drop explicit --target and its value: we always pass zig's -target below.\n"
+              "      skip_next=1\n"
+              "      continue\n"
+              "      ;;\n"
+          )
+          count = content.count(needle_cxx)
+          if count != 1:
+              raise SystemExit(f"expected one Zig cxx target-filter block, found {count}")
+          content = content.replace(needle_cxx, replacement_cxx, 1)
+          script.write_text(content, encoding="utf-8")
+          PY
 
       - name: Sync Cargo workspace version from release
         shell: bash
@@ -708,6 +840,33 @@ jobs:
               print("arg0 filename loop already patched")
           PY
 
+      - name: Patch Windows app roots local app data reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_file="${GITHUB_WORKSPACE}/build-src/codex-rs/cli/src/desktop_app/windows.rs"
+          if [[ ! -f "$target_file" ]]; then
+            echo "windows desktop app source not found; skip patch"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "codex-rs" / "cli" / "src" / "desktop_app" / "windows.rs"
+          text = path.read_text(encoding="utf-8")
+          updated = text.replace(
+              "roots.push(PathBuf::from(local_app_data).join(\"Programs\"));",
+              "roots.push(PathBuf::from(local_app_data.clone()).join(\"Programs\"));",
+              1,
+          )
+          if updated != text:
+              path.write_text(updated, encoding="utf-8")
+              print("patched windows app roots LOCALAPPDATA reuse")
+          else:
+              print("windows app roots LOCALAPPDATA reuse already patched")
+          PY
+
       - name: Patch missing StandaloneWindows update action
         shell: bash
         run: |
@@ -751,7 +910,7 @@ jobs:
           }
 
           #[cfg(not(debug_assertions))]
-          pub(crate) fn get_update_action() -> Option<UpdateAction> {
+          pub fn get_update_action() -> Option<UpdateAction> {
               let exe = std::env::current_exe().unwrap_or_default();
               let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
               let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
@@ -840,6 +999,67 @@ jobs:
           EOF
           echo "rewrote update_action.rs with Windows-compatible fixed content"
 
+      - name: Patch Unix-only additional permissions preapproval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build-src/codex-rs/core/src/unified_exec/process_manager.rs")
+          text = path.read_text(encoding="utf-8")
+          old = "\n".join([
+              "                sandbox_permissions: if request.additional_permissions_preapproved {",
+              "                    crate::sandboxing::SandboxPermissions::UseDefault",
+              "                } else {",
+              "                    request.sandbox_permissions",
+              "                },",
+          ]) + "\n"
+          new = "\n".join([
+              "                sandbox_permissions: {",
+              "                    #[cfg(unix)]",
+              "                    {",
+              "                        if request.additional_permissions_preapproved {",
+              "                            crate::sandboxing::SandboxPermissions::UseDefault",
+              "                        } else {",
+              "                            request.sandbox_permissions",
+              "                        }",
+              "                    }",
+              "                    #[cfg(not(unix))]",
+              "                    {",
+              "                        request.sandbox_permissions",
+              "                    }",
+              "                },",
+          ]) + "\n"
+          if old in text:
+              path.write_text(text.replace(old, new), encoding="utf-8")
+              print("patched Unix-only additional permissions preapproval")
+          elif new in text:
+              print("Unix-only additional permissions preapproval already patched")
+          else:
+              raise SystemExit("target block not found in process_manager.rs")
+          PY
+
+      - name: Patch Windows active permission profile override
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build-src/codex-rs/tui/src/app.rs")
+          text = path.read_text(encoding="utf-8")
+          old = "                                        Some(preset.permission_profile.clone()),\n"
+          new = "                                        Some(preset.active_permission_profile.clone()),\n"
+          if old in text:
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print("patched Windows active permission profile override")
+          elif new in text:
+              print("Windows active permission profile override already patched")
+          else:
+              raise SystemExit("target line not found in tui/src/app.rs")
+          PY
+
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
@@ -857,9 +1077,19 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libubsan1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.93.0
-        with:
-          targets: ${{ env.TARGET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_file="${GITHUB_WORKSPACE}/build-src/codex-rs/rust-toolchain.toml"
+          channel="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' "${toolchain_file}")"
+          if [[ -z "${channel}" ]]; then
+            echo "failed to read Rust channel from ${toolchain_file}" >&2
+            exit 1
+          fi
+          rustup toolchain install "${channel}" --target "${TARGET}" --profile minimal --no-self-update
+          rustup default "${channel}"
+          rustc --version --verbose
+          cargo --version --verbose
 
       - name: Use git CLI for Cargo git dependencies
         if: ${{ runner.os == 'macOS' }}
@@ -867,6 +1097,18 @@ jobs:
         run: |
           set -euo pipefail
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: Isolate aarch64 macOS Cargo state
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${RUNNER_TEMP}/cargo-home-${TARGET}"
+          target_dir="${RUNNER_TEMP}/cargo-target-${TARGET}"
+          mkdir -p "${cargo_home}/bin" "${target_dir}"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=${target_dir}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
 
       - name: Setup MSVC toolchain
         if: ${{ runner.os == 'Windows' }}
@@ -928,6 +1170,56 @@ jobs:
             attempt=$((attempt + 1))
           done
 
+      - name: Patch generated Zig cc wrappers
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="${RUNNER_TEMP}/codex-musl-tools-${TARGET}"
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          tool_root = pathlib.Path(os.environ["RUNNER_TEMP"]) / f"codex-musl-tools-{os.environ['TARGET']}"
+          for name in ("zigcc", "zigcxx"):
+              path = tool_root / name
+              if not path.exists():
+                  raise SystemExit(f"missing generated Zig wrapper: {path}")
+              content = path.read_text(encoding="utf-8")
+              content = content.replace(
+                  "set -euo pipefail\n\n",
+                  "set -euo pipefail\nunset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n\n",
+                  1,
+              )
+              content = content.replace(
+                  'exec "${zig_bin}" cc -target "${zig_target}" "${args[@]}"',
+                  'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" cc -target "${zig_target}" "${args[@]}"',
+                  1,
+              )
+              content = content.replace(
+                  'exec "${zig_bin}" c++ -target "${zig_target}" "${args[@]}"',
+                  'exec env -u ZIG_GLOBAL_CACHE_DIR -u ZIG_LOCAL_CACHE_DIR "${zig_bin}" c++ -target "${zig_target}" "${args[@]}"',
+                  1,
+              )
+              cache_filter = (
+                  "  case \"${arg}\" in\n"
+                  "    --cache-dir)\n"
+                  "      skip_next=1\n"
+                  "      continue\n"
+                  "      ;;\n"
+                  "    --cache-dir=*)\n"
+                  "      continue\n"
+                  "      ;;\n"
+              )
+              if "--cache-dir)" not in content:
+                  marker = "  case \"${arg}\" in\n"
+                  count = content.count(marker)
+                  if count != 1:
+                      raise SystemExit(f"expected one arg case block in {path}, found {count}")
+                  content = content.replace(marker, cache_filter, 1)
+              path.write_text(content, encoding="utf-8")
+          PY
+
       - name: Use Zig linker for musl targets
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
         shell: bash
@@ -964,14 +1256,14 @@ jobs:
             ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
           fi
           wrapper="${RUNNER_TEMP}/rustc-ubsan-wrapper"
-          cat > "${wrapper}" <<EOF
+          cat > "${wrapper}" <<EOF2
           #!/usr/bin/env bash
           set -euo pipefail
           if [[ -n "${ubsan}" ]]; then
             export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
           fi
           exec "\$1" "\${@:2}"
-          EOF
+          EOF2
           chmod +x "${wrapper}"
           echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
           echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
@@ -981,9 +1273,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Keep the musl linker configuration explicit, and add a best-effort
-          # hint to reduce linker peak memory on constrained runners.
-          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no"
+          # Match the last known successful full release run while keeping Zig
+          # cache-dir filtering in the generated wrappers above.
+          common_rustflags="-C link-arg=-lm -C link-arg=-Wl,--no-keep-memory -C link-self-contained=no --remap-path-prefix=${GITHUB_WORKSPACE}=/.build"
           echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
           target_no_jitter="${target_no_jitter//-/_}"
@@ -1007,15 +1299,23 @@ jobs:
 
           echo "CFLAGS=$(sanitize_flags "${CFLAGS-}")" >> "$GITHUB_ENV"
           echo "CXXFLAGS=$(sanitize_flags "${CXXFLAGS-}")" >> "$GITHUB_ENV"
-
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
+        if: ${{ env.TARGET != 'aarch64-apple-darwin' }}
         with:
           key: ${{ env.TARGET }}
           workspaces: |
             ${{ github.workspace }}/build-src/codex-rs -> target
           cache-directories: |
             ${{ github.workspace }}/.cargo-home
+
+      - name: Clear stale aarch64 macOS target artifacts
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${CARGO_TARGET_DIR}"
+          mkdir -p "${CARGO_TARGET_DIR}"
 
       - name: Configure musl rusty_v8 artifact overrides
         if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-musl' }}
@@ -1079,7 +1379,6 @@ jobs:
           archive_path="${binding_dir}/librusty_v8_release_${TARGET}.a.gz"
           binding_path="${binding_dir}/src_binding_release_${TARGET}.rs"
           checksums_path="${binding_dir}/rusty_v8_release_${TARGET}.sha256"
-          checksums_source="${GITHUB_WORKSPACE}/build-src/third_party/v8/rusty_v8_${version//./_}.sha256"
           mkdir -p "${binding_dir}"
 
           curl -fsSL \
@@ -1097,10 +1396,15 @@ jobs:
             "${base_url}/src_binding_release_${TARGET}.rs" \
             -o "${binding_path}"
 
-          grep -E "  (librusty_v8_release_${TARGET}[.]a[.]gz|src_binding_release_${TARGET}[.]rs)$" \
-            "${checksums_source}" > "${checksums_path}"
+          curl -fsSL \
+            --retry 5 \
+            --retry-connrefused \
+            --retry-delay 2 \
+            --max-time 120 \
+            "${base_url}/rusty_v8_release_${TARGET}.sha256" \
+            -o "${checksums_path}"
           if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
-            echo "expected exactly two checksums for ${TARGET} in ${checksums_source}" >&2
+            echo "expected exactly two checksums for ${TARGET} from ${base_url}" >&2
             exit 1
           fi
 
@@ -1130,35 +1434,124 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The ubuntu-24.04-arm hosted runner is relatively constrained; rustc
-          # parallelism can OOM/kill the runner and surface as "lost communication".
+          # aarch64 arm runners are memory-constrained; serialise and rely on
+          # swap (enabled in a later step) to survive fat-LTO linking.
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_DEBUG=0" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_STRIP=debuginfo" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
           echo "MALLOC_ARENA_MAX=2" >> "$GITHUB_ENV"
-          # If upstream enables LTO by default, overriding it helps cut peak
-          # link memory and improves runner stability.
-          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
-          # Reduce peak memory pressure during linking. (musl targets override
-          # RUSTFLAGS later with their own explicit linker settings.)
-          extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
-          if [[ -n "${RUSTFLAGS:-}" ]]; then
-            extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
+          # fat LTO causes OOM on aarch64 musl; use thin to reduce peak link-time memory.
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          else
+            echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
           fi
-          echo "RUSTFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
-          echo "RUSTDOCFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
+          # --no-keep-memory helps the linker trade speed for lower memory on constrained runners.
+          if [[ "${TARGET}" == *-unknown-linux-gnu || "${TARGET}" == *-unknown-linux-musl ]]; then
+            extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
+            if [[ -n "${RUSTFLAGS:-}" ]]; then
+              extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
+            fi
+            echo "RUSTFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+            echo "RUSTDOCFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+          fi
 
-      - name: Enable swap on aarch64 Linux runner
-        if: ${{ env.TARGET == 'aarch64-unknown-linux-musl' || env.TARGET == 'aarch64-unknown-linux-gnu' }}
+      - name: Reduce Rust build memory on x86_64 Linux
+        if: ${{ env.TARGET == 'x86_64-unknown-linux-musl' || env.TARGET == 'x86_64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both musl and GNU targets use fat LTO for smallest binaries.
+          # Swap is enabled in a later step to handle the higher link-time
+          # memory requirements.
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
+          if [[ "${TARGET}" == *-unknown-linux-gnu ]]; then
+            extra_rustflags="-C link-arg=-Wl,--no-keep-memory"
+            if [[ -n "${RUSTFLAGS:-}" ]]; then
+              extra_rustflags="${extra_rustflags} ${RUSTFLAGS}"
+            fi
+            echo "RUSTFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+            echo "RUSTDOCFLAGS=${extra_rustflags}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Reduce Rust build memory on aarch64 Windows
+        if: ${{ env.TARGET == 'aarch64-pc-windows-msvc' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Keep the aarch64 Windows build serialized, but use fat LTO to avoid
+          # the large code-size regression caused by disabling LTO entirely.
+          "CARGO_PROFILE_RELEASE_LTO=fat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_STRIP=symbols" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_BUILD_JOBS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Enabled fat LTO with serialized jobs for aarch64 Windows cross-compile"
+
+      - name: Reduce Rust build memory on aarch64 macOS
+        if: ${{ env.TARGET == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # aarch64 macOS has no cache and LTO linking takes longer, so keep the
+          # build serialized while preserving fat LTO to avoid bloated release binaries.
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+
+      - name: Optimise release profile on x86_64 macOS
+        if: ${{ env.TARGET == 'x86_64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=fat" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_STRIP=symbols" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_PANIC=abort" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" >> "$GITHUB_ENV"
+
+      - name: Optimise release profile on x86_64 Windows
+        if: ${{ env.TARGET == 'x86_64-pc-windows-msvc' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CARGO_PROFILE_RELEASE_LTO=fat" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_STRIP=symbols" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Enable swap on Linux runner
+        if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
           # If the runner OOM-kills the build, GitHub often reports it as
           # "lost communication". Adding swap trades speed for stability.
           size_gb="10"
-          if [[ ! -f /swapfile ]]; then
+          desired_bytes="$((size_gb * 1024 * 1024 * 1024))"
+          current_bytes="0"
+          if [[ -f /swapfile ]]; then
+            current_bytes="$(sudo stat -c '%s' /swapfile)"
+          fi
+          if [[ ! -f /swapfile || "${current_bytes}" -lt "${desired_bytes}" ]]; then
+            if sudo swapon --show=NAME --noheadings | awk '$1 == "/swapfile" { found = 1 } END { exit(found ? 0 : 1) }'; then
+              sudo swapoff /swapfile || true
+            fi
+            sudo rm -f /swapfile
             sudo fallocate -l "${size_gb}G" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count="$((size_gb * 1024))"
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
@@ -1174,7 +1567,15 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          cargo_bin="$(command -v cargo)"
+          timings=(--timings)
           enabled_features=()
+          if [[ "${CODEX_RELEASE_ENABLE_AWS_AUTH}" == "true" ]]; then
+            enabled_features+=(aws-auth)
+          fi
+          if [[ "${CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS}" == "true" ]]; then
+            enabled_features+=(semantic-embeddings)
+          fi
           if [[ "${CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS}" == "true" ]]; then
             enabled_features+=(posthog-analytics)
           fi
@@ -1188,37 +1589,41 @@ jobs:
           acp_manifest="${GITHUB_WORKSPACE}/build-src/codex-acp/Cargo.toml"
           build_acp() {
             echo "Building optional codex-acp for ${TARGET}"
-            cargo build --manifest-path "$acp_manifest" --target "${TARGET}" --release "${timings[@]}"
+            "${cargo_bin}" build --manifest-path "$acp_manifest" --target "${TARGET}" --release "${timings[@]}"
             local acp_binary="${CARGO_TARGET_DIR}/${TARGET}/release/codex-acp"
             [[ -x "$acp_binary" ]] || {
               echo "codex-acp binary missing after build: $acp_binary" >&2
               exit 1
             }
           }
-          timings=(--timings)
-          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
+          if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
             # for the flakiest target.
             timings=()
           fi
-          if [[ "${TARGET}" == aarch64-unknown-linux-* ]]; then
+          if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Link one binary at a time to reduce peak memory pressure.
-            cargo build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
-            cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" -p codex-cli
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+            if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
+            fi
             if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
               build_acp
             fi
           else
             if [[ "${#feature_args[@]}" -gt 0 ]]; then
-              cargo build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" --bin codex
-              cargo build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" -p codex-cli
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+              if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+                build_acp
+              fi
             else
-              cargo build --target "${TARGET}" --release "${timings[@]}" \
-                --bin codex \
-                --bin codex-responses-api-proxy
-            fi
-            if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-              build_acp
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" -p codex-cli
+              "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
+              if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+                build_acp
+              fi
             fi
           fi
 
@@ -1230,6 +1635,12 @@ jobs:
           Set-Location "$env:GITHUB_WORKSPACE/build-src/codex-rs"
 
           $enabledFeatures = @()
+          if ($env:CODEX_RELEASE_ENABLE_AWS_AUTH -eq "true") {
+            $enabledFeatures += "aws-auth"
+          }
+          if ($env:CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS -eq "true") {
+            $enabledFeatures += "semantic-embeddings"
+          }
           if ($env:CODEX_RELEASE_ENABLE_POSTHOG_ANALYTICS -eq "true") {
             $enabledFeatures += "posthog-analytics"
           }
@@ -1253,18 +1664,36 @@ jobs:
             }
           }
 
-          cargo build --target $env:TARGET --release --timings @featureArgs -p codex-cli
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          cargo build --target $env:TARGET --release --timings `
-            -p codex-responses-api-proxy `
-            -p codex-windows-sandbox
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
-          if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
-            Build-Acp
+          if ($featureArgs.Count -gt 0) {
+            cargo build --target $env:TARGET --release --timings @featureArgs -p codex-cli
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            cargo build --target $env:TARGET --release --timings `
+              --bin codex-responses-api-proxy `
+              --bin codex-windows-sandbox-setup `
+              --bin codex-command-runner
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              Build-Acp
+            }
+          } else {
+            cargo build --target $env:TARGET --release --timings -p codex-cli
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            cargo build --target $env:TARGET --release --timings `
+              --bin codex-responses-api-proxy `
+              --bin codex-windows-sandbox-setup `
+              --bin codex-command-runner
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              Build-Acp
+            }
           }
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
@@ -1273,6 +1702,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
 
           limit="2.35"
 
@@ -1307,16 +1737,18 @@ jobs:
               || { echo "❌ ${bin} requires GLIBC_${max} > GLIBC_${limit}" >&2; exit 1; }
           }
 
-          require_max_glibc "target/${TARGET}/release/codex"
-          require_max_glibc "target/${TARGET}/release/codex-responses-api-proxy"
+          require_max_glibc "${release_dir}/codex"
+          require_max_glibc "${release_dir}/codex-responses-api-proxy"
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            require_max_glibc "${release_dir}/codex-acp"
+          fi
           echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Smoke test Windows artifacts
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
-          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-rs"
-          $releaseDir = Join-Path $buildRoot "target/$env:TARGET/release"
+          $releaseDir = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET/release"
 
           if ($env:TARGET -eq "x86_64-pc-windows-msvc") {
             & (Join-Path $releaseDir "codex.exe") --version
@@ -1327,6 +1759,13 @@ jobs:
             & (Join-Path $releaseDir "codex-responses-api-proxy.exe") --help | Out-Null
             if ($LASTEXITCODE -ne 0) {
               throw "codex-responses-api-proxy.exe smoke test failed"
+            }
+
+            if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+              & (Join-Path $releaseDir "codex-acp.exe") --help | Out-Null
+              if ($LASTEXITCODE -ne 0) {
+                throw "codex-acp.exe smoke test failed"
+              }
             }
           }
 
@@ -1340,8 +1779,10 @@ jobs:
               throw "missing Windows artifact: $binary"
             }
           }
-          if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true" -and -not (Test-Path (Join-Path $releaseDir "codex-acp.exe"))) {
-            throw "missing Windows artifact: codex-acp.exe"
+          if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
+            if (-not (Test-Path (Join-Path $releaseDir "codex-acp.exe"))) {
+              throw "missing Windows artifact: codex-acp.exe"
+            }
           }
 
       - name: Smoke test macOS artifacts
@@ -1350,10 +1791,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          "target/${TARGET}/release/codex" --version
-          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          "${release_dir}/codex" --version
+          "${release_dir}/codex-responses-api-proxy" --help >/dev/null
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-            "target/${TARGET}/release/codex-acp" --help >/dev/null
+            "${release_dir}/codex-acp" --help >/dev/null
           fi
 
       - name: Smoke test Linux artifacts
@@ -1362,7 +1804,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          bin_dir="target/${TARGET}/release"
+          bin_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           bins=(codex codex-responses-api-proxy)
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
             bins+=(codex-acp)
@@ -1377,6 +1819,12 @@ jobs:
               "${binary_path}" --help >/dev/null
             fi
           done
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            [[ -x "${bin_dir}/bwrap" ]] || {
+              echo "missing Linux artifact: bwrap"
+              exit 1
+            }
+          fi
 
       - name: MacOS code signing (binaries)
         if: ${{ runner.os == 'macOS' }}
@@ -1399,10 +1847,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          "target/${TARGET}/release/codex" --version
-          "target/${TARGET}/release/codex-responses-api-proxy" --help >/dev/null
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          "${release_dir}/codex" --version
+          "${release_dir}/codex-responses-api-proxy" --help >/dev/null
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-            "target/${TARGET}/release/codex-acp" --help >/dev/null
+            "${release_dir}/codex-acp" --help >/dev/null
           fi
 
       - name: Build macOS dmg
@@ -1412,7 +1861,7 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
 
-          release_dir="target/${TARGET}/release"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           dmg_path="${release_dir}/codex-${TARGET}.dmg"
           tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
@@ -1420,7 +1869,6 @@ jobs:
 
           codex_binary_path="${release_dir}/codex"
           proxy_binary_path="${release_dir}/codex-responses-api-proxy"
-
           [[ -f "$codex_binary_path" ]] || {
             echo "binary $codex_binary_path not found"
             exit 1
@@ -1429,19 +1877,17 @@ jobs:
             echo "binary $proxy_binary_path not found"
             exit 1
           }
-          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-            acp_binary_path="${release_dir}/codex-acp"
-            [[ -f "$acp_binary_path" ]] || {
-              echo "binary $acp_binary_path not found"
-              exit 1
-            }
-          fi
 
           rm -rf "$dmg_root"
           mkdir -p "$dmg_root"
           ditto "$codex_binary_path" "${dmg_root}/codex"
           ditto "$proxy_binary_path" "${dmg_root}/codex-responses-api-proxy"
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            acp_binary_path="${release_dir}/codex-acp"
+            [[ -f "$acp_binary_path" ]] || {
+              echo "binary $acp_binary_path not found"
+              exit 1
+            }
             ditto "$acp_binary_path" "${dmg_root}/codex-acp"
           fi
 
@@ -1492,7 +1938,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          release_dir="target/${TARGET}/release"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           binaries=(codex codex-responses-api-proxy)
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
             binaries+=(codex-acp)
@@ -1508,6 +1954,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
           ext=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             ext=".exe"
@@ -1515,18 +1962,106 @@ jobs:
 
           dest="dist/${TARGET}"
           mkdir -p "$dest"
-          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
-          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          cp "${release_dir}/codex${ext}" "$dest/codex-${TARGET}${ext}"
+          cp "${release_dir}/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
           if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-            cp "target/${TARGET}/release/codex-acp${ext}" "$dest/codex-acp-${TARGET}${ext}"
+            cp "${release_dir}/codex-acp${ext}" "$dest/codex-acp-${TARGET}${ext}"
+          fi
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            cp "${release_dir}/bwrap" "$dest/bwrap-${TARGET}"
           fi
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "target/${TARGET}/release/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
-            cp "target/${TARGET}/release/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
+            cp "${release_dir}/codex-windows-sandbox-setup.exe" "$dest/codex-windows-sandbox-setup-${TARGET}.exe"
+            cp "${release_dir}/codex-command-runner.exe" "$dest/codex-command-runner-${TARGET}.exe"
           fi
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            cp "target/${TARGET}/release/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
+            cp "${release_dir}/codex-${TARGET}.dmg" "$dest/codex-${TARGET}.dmg"
           fi
+
+      - name: Verify staged artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+
+          required_artifacts=(
+            "dist/${TARGET}/codex-${TARGET}${ext}"
+            "dist/${TARGET}/codex-responses-api-proxy-${TARGET}${ext}"
+          )
+          if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
+            required_artifacts+=("dist/${TARGET}/codex-acp-${TARGET}${ext}")
+          fi
+
+          if [[ "${TARGET}" == *-unknown-linux-musl ]]; then
+            required_artifacts+=("dist/${TARGET}/bwrap-${TARGET}")
+          fi
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            required_artifacts+=(
+              "dist/${TARGET}/codex-windows-sandbox-setup-${TARGET}.exe"
+              "dist/${TARGET}/codex-command-runner-${TARGET}.exe"
+            )
+          fi
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            required_artifacts+=("dist/${TARGET}/codex-${TARGET}.dmg")
+          fi
+
+          for artifact in "${required_artifacts[@]}"; do
+            [[ -f "${artifact}" ]] || {
+              echo "missing staged artifact: ${artifact}" >&2
+              exit 1
+            }
+          done
+
+      - name: Enforce artifact size budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+          codex_path="dist/${TARGET}/codex-${TARGET}${ext}"
+          actual_size="$(wc -c < "${codex_path}" | tr -d '[:space:]')"
+          budget=""
+          case "${TARGET}" in
+            x86_64-unknown-linux-musl)
+              budget=190000000
+              ;;
+            aarch64-apple-darwin)
+              budget=245000000
+              ;;
+            aarch64-pc-windows-msvc)
+              budget=285000000
+              ;;
+          esac
+          if [[ -n "${budget}" && "${actual_size}" -gt "${budget}" ]]; then
+            echo "codex artifact too large for ${TARGET}: ${actual_size} bytes > budget ${budget} bytes" >&2
+            exit 1
+          fi
+          echo "codex artifact size for ${TARGET}: ${actual_size} bytes (budget: ${budget:-none})"
+
+      - name: Summarize artifact sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          dest="dist/${TARGET}"
+          echo "### Artifact sizes for ${TARGET}" >> "${GITHUB_STEP_SUMMARY}"
+          for f in "${dest}"/*; do
+            [[ -f "$f" ]] || continue
+            size="$(wc -c < "$f" | tr -d '[:space:]')"
+            printf "%s %s\n" "$size" "$(basename "$f")"
+          done | sort -nr | tee /tmp/artifact-sizes.txt
+          {
+            echo '```text'
+            cat /tmp/artifact-sizes.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Compress artifacts
         shell: bash
@@ -1574,6 +2109,7 @@ jobs:
       RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
       RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
       TARGETS: ${{ needs.resolve.outputs.targets }}
+      CODEX_RELEASE_ENABLE_ACP: ${{ needs.resolve.outputs.enable_acp }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -1713,6 +2249,49 @@ jobs:
 
             tar -czf "$tarball" -C "$workdir" package
             rm -rf "$workdir"
+          done
+
+      - name: Enforce npm package size budgets
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(dist/npm/*.tgz)
+          [[ ${#tarballs[@]} -gt 0 ]] || {
+            echo "no npm tarballs found for size budget checks"
+            exit 1
+          }
+          for tarball in "${tarballs[@]}"; do
+            workdir="$(mktemp -d)"
+            tar -xzf "${tarball}" -C "${workdir}"
+            package_name="$(node -e 'const fs=require("fs"); const p=process.argv[1]; console.log(JSON.parse(fs.readFileSync(p,"utf8")).name)' "${workdir}/package/package.json")"
+            budget=""
+            case "${package_name}" in
+              @sohaha/zcodex-linux-x64)
+                codex_path="${workdir}/package/vendor/x86_64-unknown-linux-musl/codex/codex"
+                budget=190000000
+                ;;
+              @sohaha/zcodex-darwin-arm64)
+                codex_path="${workdir}/package/vendor/aarch64-apple-darwin/codex/codex"
+                budget=245000000
+                ;;
+              @sohaha/zcodex-win32-arm64)
+                codex_path="${workdir}/package/vendor/aarch64-pc-windows-msvc/codex/codex.exe"
+                budget=285000000
+                ;;
+              *)
+                rm -rf "${workdir}"
+                continue
+                ;;
+            esac
+            actual_size="$(wc -c < "${codex_path}" | tr -d '[:space:]')"
+            if [[ "${actual_size}" -gt "${budget}" ]]; then
+              echo "npm package ${package_name} codex binary too large: ${actual_size} bytes > budget ${budget} bytes" >&2
+              exit 1
+            fi
+            echo "npm package ${package_name} codex binary size: ${actual_size} bytes (budget: ${budget})"
+            rm -rf "${workdir}"
           done
 
       - name: Resolve GitHub release token

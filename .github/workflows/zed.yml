@@ -1,0 +1,1072 @@
+name: Build Zed Release
+
+on:
+  repository_dispatch:
+    types: [build-zed-release]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        required: true
+        type: string
+        default: sohaha/zed
+      source_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      target:
+        required: true
+        type: choice
+        options:
+          - win-x64
+          - win-arm64
+          - linux-x64
+          - linux-arm64
+          - mac-arm64
+          - mac-x64
+      targets:
+        required: false
+        type: string
+        description: Optional comma-separated targets. Supports mac/linux/win/all aliases.
+      channel:
+        required: true
+        type: choice
+        options:
+          - stable
+          - preview
+          - nightly
+          - dev
+        default: stable
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/codexi-releases
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}-${{ inputs.channel || github.event.client_payload.channel || 'stable' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TARGET_DIR: target
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RUST_BACKTRACE: "1"
+  ZED_WORKSPACE: ${{ github.workspace }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_repo: ${{ steps.payload.outputs.source_repo }}
+      source_sha: ${{ steps.payload.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      targets: ${{ steps.targets.outputs.targets }}
+      channel: ${{ steps.payload.outputs.channel }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "source_repo=${{ github.event.client_payload.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ github.event.client_payload.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ github.event.client_payload.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ github.event.client_payload.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ github.event.client_payload.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ github.event.client_payload.release_repo }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_repo=${{ inputs.source_repo }}" >> "$GITHUB_OUTPUT"
+            echo "source_sha=${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "targets_input=${{ inputs.targets }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "release_repo=${{ inputs.release_repo }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/zed" ]] || exit 1
+          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codexi-releases" ]] || exit 1
+          [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          [[ "${{ steps.payload.outputs.channel }}" =~ ^(stable|preview|nightly|dev)$ ]] || exit 1
+
+      - name: Normalize targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          raw_targets='${{ steps.payload.outputs.targets_input }}'
+          if [[ -z "$raw_targets" ]]; then
+            raw_targets='${{ steps.payload.outputs.target }}'
+          fi
+
+          raw_targets="${raw_targets//[[:space:]]/}"
+          [[ -n "$raw_targets" ]] || {
+            echo "missing target(s)"
+            exit 1
+          }
+
+          declare -A seen=()
+          normalized=()
+
+          IFS=',' read -r -a requested <<< "$raw_targets"
+          for item in "${requested[@]}"; do
+            case "$item" in
+              all)
+                expanded=("win-x64" "win-arm64" "mac-arm64" "mac-x64" "linux-x64" "linux-arm64")
+                ;;
+              mac)
+                expanded=("mac-arm64" "mac-x64")
+                ;;
+              linux)
+                expanded=("linux-x64" "linux-arm64")
+                ;;
+              win|windows)
+                expanded=("win-x64" "win-arm64")
+                ;;
+              win-64)
+                expanded=("win-x64")
+                ;;
+              win-x64|win-arm64|linux-x64|linux-arm64|mac-arm64|mac-x64)
+                expanded=("$item")
+                ;;
+              *)
+                echo "unsupported target: $item"
+                exit 1
+                ;;
+            esac
+
+            for target in "${expanded[@]}"; do
+              if [[ -z "${seen[$target]+x}" ]]; then
+                seen[$target]=1
+                normalized+=("$target")
+              fi
+            done
+          done
+
+          targets="$(IFS=,; echo "${normalized[*]}")"
+          matrix="$(
+            printf '%s\n' "${normalized[@]}" | jq -R -s -c '
+              split("\n")
+              | map(select(length > 0))
+              | map({
+                  target: .,
+                  runner: (
+                    if . == "linux-x64" then "ubuntu-24.04"
+                    elif . == "linux-arm64" then "ubuntu-24.04-arm"
+                    elif . == "mac-arm64" then "macos-latest"
+                    elif . == "mac-x64" then "macos-15-intel"
+                    elif . == "win-x64" then "windows-latest"
+                    elif . == "win-arm64" then "windows-11-arm"
+                    else error("unsupported target")
+                    end
+                  )
+                })
+              | {include: .}
+            '
+          )"
+
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  validate_secrets:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release token
+        shell: bash
+        env:
+          CODEBAY_SOURCE_READ_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in CODEBAY_SOURCE_READ_TOKEN CODEBAY_RELEASE_WRITE_TOKEN; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for release:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Validate macOS signing secrets
+        if: ${{ contains(needs.resolve.outputs.targets, 'mac-arm64') || contains(needs.resolve.outputs.targets, 'mac-x64') }}
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "missing GitHub Actions secrets required for macOS signing:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+  build:
+    needs:
+      - resolve
+      - validate_secrets
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    env:
+      APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+      APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+      APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
+      ACCOUNT_NAME: ${{ vars.AZURE_SIGNING_ACCOUNT_NAME }}
+      CERT_PROFILE_NAME: ${{ vars.AZURE_SIGNING_CERT_PROFILE_NAME }}
+      ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      FILE_DIGEST: SHA256
+      MACOS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      TIMESTAMP_DIGEST: SHA256
+      TIMESTAMP_SERVER: http://timestamp.acs.microsoft.com
+      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
+      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          clean: false
+          fetch-depth: 0
+          repository: ${{ needs.resolve.outputs.source_repo }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          token: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+
+      - name: Patch missing translations crate license metadata
+        shell: pwsh
+        run: |
+          $cargoToml = "crates/translations/Cargo.toml"
+          if (-not (Test-Path $cargoToml)) {
+            exit 0
+          }
+
+          $content = Get-Content -Raw -Path $cargoToml
+          if ($content -match '(?m)^license\s*=') {
+            exit 0
+          }
+
+          $updated = $content -replace '(?m)^(edition\s*=\s*".*")\r?\n', "`$1`nlicense = `"GPL-3.0-or-later`"`n"
+          if ($updated -eq $content) {
+            throw "failed to patch missing license metadata in $cargoToml"
+          }
+
+          Set-Content -Path $cargoToml -Value $updated -NoNewline
+
+      - name: Enable Windows long paths
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" `
+            -Value 1 `
+            -PropertyType DWord `
+            -Force
+
+      - name: Patch macOS bundle script to allow skipping license generation
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          script_path="script/bundle-mac"
+          if grep -q 'SKIP_GENERATE_LICENSES' "$script_path"; then
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("script/bundle-mac")
+          text = path.read_text()
+          old = "# Generate the licenses first, so they can be baked into the binaries\nscript/generate-licenses"
+          new = """# Generate the licenses first, so they can be baked into the binaries
+          if [[ "${SKIP_GENERATE_LICENSES:-}" == "true" ]]; then
+              echo "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+              mkdir -p assets
+              printf "License generation skipped for this CI release build.\\n" > assets/licenses.md
+          else
+              script/generate-licenses
+          fi"""
+
+          if old not in text:
+              raise SystemExit("failed to patch script/bundle-mac license generation block")
+
+          path.write_text(text.replace(old, new))
+          PY
+
+      - name: Patch macOS bundle script to use imported signing identity
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          script_path="script/bundle-mac"
+          if grep -q 'security find-identity -v -p codesigning zed.keychain' "$script_path"; then
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("script/bundle-mac")
+          text = path.read_text()
+          marker = 'security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" zed.keychain'
+          replacement = marker + r'''
+
+              imported_identity="$(security find-identity -v -p codesigning zed.keychain | awk -F'"' '/Developer ID Application:/ {print $2; exit}')"
+              if [[ -z "$imported_identity" ]]; then
+                  echo "Failed to resolve imported Developer ID Application identity"
+                  security find-identity -v -p codesigning zed.keychain || true
+                  exit 1
+              fi
+              IDENTITY="$imported_identity"'''
+
+          if marker not in text:
+              raise SystemExit("failed to patch script/bundle-mac signing identity block")
+
+          path.write_text(text.replace(marker, replacement))
+          PY
+
+      - name: Patch Linux bundle script to allow skipping license generation
+        if: startsWith(matrix.target, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          script_path="script/bundle-linux"
+          if grep -q 'SKIP_GENERATE_LICENSES' "$script_path"; then
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("script/bundle-linux")
+          text = path.read_text()
+          old = "# Generate the licenses first, so they can be baked into the binaries\nscript/generate-licenses"
+          new = """# Generate the licenses first, so they can be baked into the binaries
+          if [[ "${SKIP_GENERATE_LICENSES:-}" == "true" ]]; then
+              echo "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+              mkdir -p assets
+              printf "License generation skipped for this CI release build.\\n" > assets/licenses.md
+          else
+              script/generate-licenses
+          fi"""
+
+          if old not in text:
+              raise SystemExit("failed to patch script/bundle-linux license generation block")
+
+          path.write_text(text.replace(old, new))
+          PY
+
+      - name: Patch Windows bundle script to resolve VsDevShell dynamically
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $scriptPath = "script/bundle-windows.ps1"
+          $content = Get-Content -Raw -Path $scriptPath
+          if (
+            $content -match 'vswhere\.exe' -and
+            $content -match 'Resolve-ReleaseVersion' -and
+            $content -match 'SKIP_GENERATE_LICENSES' -and
+            $content -match 'SKIP_WINDOWS_SIGNING'
+          ) {
+            exit 0
+          }
+
+          $old = @'
+          Push-Location
+          & "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+          Pop-Location
+          '@
+
+          $new = @'
+          $programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86")
+          $vsWhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstallPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstallPath) {
+              throw "Failed to resolve Visual Studio installation path via vswhere.exe"
+          }
+
+          $vsDevShell = Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1"
+          if (-not (Test-Path $vsDevShell)) {
+              throw "Launch-VsDevShell.ps1 not found at $vsDevShell"
+          }
+
+          $hostArch = if ($OSArchitecture -eq "aarch64") { "amd64" } else { Get-VSArch -Arch $OSArchitecture }
+
+          Push-Location
+          & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch $hostArch
+          Pop-Location
+          '@
+
+          if (-not $content.Contains($old)) {
+            throw "failed to patch Launch-VsDevShell block in $scriptPath"
+          }
+
+          $updated = $content.Replace($old, $new)
+          $updated = $updated -replace [regex]::Escape('$buildSuccess = $false'), @'
+          $buildSuccess = $false
+
+          function Resolve-ReleaseVersion {
+              if (Test-Path "env:RELEASE_VERSION") {
+                  return $env:RELEASE_VERSION
+              }
+
+              $cargoToml = "crates/zed/Cargo.toml"
+              if (-not (Test-Path $cargoToml)) {
+                  throw "cannot resolve RELEASE_VERSION because $cargoToml is missing"
+              }
+
+              $versionLine = Select-String -Path $cargoToml -Pattern '(?m)^version = "([^"]+)"' | Select-Object -First 1
+              if (-not $versionLine) {
+                  throw "cannot resolve RELEASE_VERSION from $cargoToml"
+              }
+
+              $resolvedVersion = $versionLine.Matches[0].Groups[1].Value
+              Set-Item -Path env:RELEASE_VERSION -Value $resolvedVersion
+              return $resolvedVersion
+          }
+
+          $requiredEnvSnapshot = @{
+              "RELEASE_VERSION" = Resolve-ReleaseVersion
+          }
+          '@
+
+          $updated = $updated -replace [regex]::Escape('$env:RELEASE_CHANNEL = $channel'), @'
+          $env:RELEASE_CHANNEL = $channel
+
+          $env:RELEASE_VERSION = Resolve-ReleaseVersion
+
+          foreach ($entry in $requiredEnvSnapshot.GetEnumerator()) {
+              Set-Item -Path "env:$($entry.Key)" -Value $entry.Value
+          }
+          '@
+
+          $updated = $updated -replace "'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL'", "'ZED_WORKSPACE', 'ZED_RELEASE_CHANNEL'"
+          $updated = $updated -replace "'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',\r?\n\s*'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',\r?\n\s*", ""
+
+          $updated = $updated -replace [regex]::Escape('function GenerateLicenses {
+              . $PSScriptRoot/generate-licenses.ps1
+          }'), @'
+          function GenerateLicenses {
+              if ($env:SKIP_GENERATE_LICENSES -eq "true") {
+                  Write-Output "Skipping license generation because SKIP_GENERATE_LICENSES=true"
+                  return
+              }
+
+              . $PSScriptRoot/generate-licenses.ps1
+          }
+          '@
+
+          $updated = $updated -replace [regex]::Escape('function SignZedAndItsFriends {
+              if (-not $env:CI) {
+                  return
+              }
+
+              $files = "$innoDir\codei.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\codei_explorer_command_injector.dll,$innoDir\codei_explorer_command_injector.appx"
+              & "$innoDir\sign.ps1" $files
+          }'), @'
+          function SignZedAndItsFriends {
+              if (-not $env:CI) {
+                  return
+              }
+
+              if ($env:SKIP_WINDOWS_SIGNING -eq "true") {
+                  Write-Output "Skipping Windows signing because SKIP_WINDOWS_SIGNING=true"
+                  return
+              }
+
+              $files = "$innoDir\codei.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\codei_explorer_command_injector.dll,$innoDir\codei_explorer_command_injector.appx"
+              & "$innoDir\sign.ps1" $files
+          }
+          '@
+
+          $remoteSignOld = @'
+              if ($env:CI) {
+                  Write-Output "Code signing remote_server.exe"
+                  & "$innoDir\sign.ps1" $remoteServerSrc
+              }
+          '@
+          $remoteSignNew = @'
+              if ($env:CI -and $env:SKIP_WINDOWS_SIGNING -ne "true") {
+                  Write-Output "Code signing remote_server.exe"
+                  & "$innoDir\sign.ps1" $remoteServerSrc
+              }
+          '@
+          $updated = $updated -replace [regex]::Escape($remoteSignOld), $remoteSignNew
+
+          # Make sign.ps1 a no-op when SKIP_WINDOWS_SIGNING is set
+          $updated = $updated -replace [regex]::Escape('throw "The ''ENDPOINT'' env is required."'), 'Write-Output "Skipping signing (SKIP_WINDOWS_SIGNING)"; return'
+
+          $innoSignOld = @'
+              $innoArgs = @($issFilePath) + $defs
+              if($env:CI) {
+                  $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
+                  $innoArgs += "/sDefaultsign=`"$signTool`""
+              }
+          '@
+          $innoSignNew = @'
+              $innoArgs = @($issFilePath) + $defs
+              if($env:CI -and $env:SKIP_WINDOWS_SIGNING -ne "true") {
+                  $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
+                  $innoArgs += "/sDefaultsign=`"$signTool`""
+              } elseif ($env:CI) {
+                  Write-Output "Skipping Inno Setup signing because SKIP_WINDOWS_SIGNING=true"
+              }
+          '@
+          $updated = $updated -replace [regex]::Escape($innoSignOld), $innoSignNew
+
+          $updated = $updated -replace [regex]::Escape('foreach ($var in $requiredVars) {
+              if (-not (Test-Path "env:$var")) {
+                  Write-Error "$var is not set"
+                  exit 1
+              }
+          }'), @'
+          foreach ($var in $requiredVars) {
+              if ($var -eq "RELEASE_VERSION" -and (Resolve-ReleaseVersion)) {
+                  continue
+              }
+
+              if (-not (Test-Path "env:$var")) {
+                  Write-Error "$var is not set"
+                  exit 1
+              }
+          }
+          '@
+
+          Set-Content -Path $scriptPath -Value $updated -NoNewline
+
+          $patched = Get-Content -Raw -Path $scriptPath
+          if (
+            -not $patched.Contains('vswhere.exe') -or
+            -not $patched.Contains('$hostArch') -or
+            -not $patched.Contains('Resolve-ReleaseVersion') -or
+            -not $patched.Contains('Skipping Inno Setup signing because SKIP_WINDOWS_SIGNING=true') -or
+            $patched.Contains("'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL'") -or
+            $patched.Contains("'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET'") -or
+            -not $patched.Contains('SKIP_WINDOWS_SIGNING') -or
+            -not $patched.Contains('SKIP_GENERATE_LICENSES')
+          ) {
+            throw "failed to verify patched Launch-VsDevShell block in $scriptPath"
+          }
+
+      - name: Patch Windows sign script to allow skipping signing
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $scriptPath = "crates/zed/resources/windows/sign.ps1"
+          $content = Get-Content -Raw -Path $scriptPath
+          if ($content -match 'Skipping signing because SKIP_WINDOWS_SIGNING=true') {
+            exit 0
+          }
+
+          $old = @'
+          $endpoint = $ENV:ENDPOINT
+          if ([string]::IsNullOrWhiteSpace($endpoint)) {
+              throw "The 'ENDPOINT' env is required."
+          }
+          $params["Endpoint"] = $endpoint
+          '@
+
+          $new = @'
+          $endpoint = $ENV:ENDPOINT
+          if ([string]::IsNullOrWhiteSpace($endpoint)) {
+              if ($env:SKIP_WINDOWS_SIGNING -eq "true") {
+                  Write-Output "Skipping signing because SKIP_WINDOWS_SIGNING=true"
+                  return
+              }
+
+              throw "The 'ENDPOINT' env is required."
+          }
+          $params["Endpoint"] = $endpoint
+          '@
+
+          if (-not $content.Contains($old)) {
+            throw "failed to patch Windows sign script in $scriptPath"
+          }
+
+          $updated = $content.Replace($old, $new)
+          Set-Content -Path $scriptPath -Value $updated -NoNewline
+
+          $patched = Get-Content -Raw -Path $scriptPath
+          if (-not $patched.Contains('Skipping signing because SKIP_WINDOWS_SIGNING=true')) {
+            throw "failed to verify patched Windows sign script in $scriptPath"
+          }
+
+      - name: Patch Windows Inno script to allow skipping signing
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $scriptPath = "crates/zed/resources/windows/zed.iss"
+          $content = Get-Content -Raw -Path $scriptPath
+          if ($content -match 'GetEnv\("SKIP_WINDOWS_SIGNING"\)') {
+            exit 0
+          }
+
+          $old = @'
+          #if GetEnv("CI") != ""
+          SignTool=Defaultsign
+          #endif
+          '@
+
+          $new = @'
+          #if GetEnv("CI") != "" && GetEnv("SKIP_WINDOWS_SIGNING") != "true"
+          SignTool=Defaultsign
+          #endif
+          '@
+
+          if (-not $content.Contains($old)) {
+            throw "failed to patch Windows Inno script in $scriptPath"
+          }
+
+          $updated = $content.Replace($old, $new)
+          Set-Content -Path $scriptPath -Value $updated -NoNewline
+
+          $patched = Get-Content -Raw -Path $scriptPath
+          if (-not $patched.Contains('GetEnv("SKIP_WINDOWS_SIGNING")')) {
+            throw "failed to verify patched Windows Inno script in $scriptPath"
+          }
+
+      - name: Set release channel and version
+        if: ${{ !startsWith(matrix.target, 'win-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ruby -0pi -e 'sub(/^version = "[^"]+"/, "version = \"${{ needs.resolve.outputs.version }}\"")' crates/zed/Cargo.toml
+          echo "${{ needs.resolve.outputs.channel }}" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_VERSION=${{ needs.resolve.outputs.version }}" >> "$GITHUB_ENV"
+
+      - name: Set release channel and version
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $cargoToml = "crates/zed/Cargo.toml"
+          $content = Get-Content -Raw -Path $cargoToml
+          $content = $content -replace '(?m)^version = "[^"]+"', 'version = "${{ needs.resolve.outputs.version }}"'
+          Set-Content -Path $cargoToml -Value $content -NoNewline
+          Set-Content -Path crates/zed/RELEASE_CHANNEL -Value "${{ needs.resolve.outputs.channel }}"
+          $env:RELEASE_VERSION = "${{ needs.resolve.outputs.version }}"
+          "RELEASE_VERSION=${{ needs.resolve.outputs.version }}" >> $env:GITHUB_ENV
+
+      - name: Disable cloud and collaboration default features
+        shell: pwsh
+        run: |
+          $cargoToml = "crates/zed/Cargo.toml"
+          $content = Get-Content -Raw -Path $cargoToml
+          if ($content -match 'default = \["i18n", "cloud"\]') {
+            $content = $content -replace 'default = \["i18n", "cloud"\]', 'default = ["i18n"]'
+          } elseif ($content -notmatch 'default = \["i18n"\]') {
+            throw "unexpected default feature set in $cargoToml"
+          }
+          Set-Content -Path $cargoToml -Value $content -NoNewline
+
+      - name: Setup Linux
+        if: startsWith(matrix.target, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./script/linux
+          ./script/download-wasi-sdk
+
+      - name: Setup Node
+        if: startsWith(matrix.target, 'mac-')
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+
+      - name: Free disk space on macOS runner
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+          rm -rf ~/Library/Developer/Xcode/DerivedData/* || true
+          rm -rf ~/Library/Caches/Homebrew/* || true
+          rm -rf ~/Library/Caches/pip/* || true
+          rm -rf ~/Library/Caches/com.apple.dt.Xcode/* || true
+          rm -rf "${RUNNER_TEMP:?}/"* || true
+          df -h
+
+      - name: Setup sentry-cli
+        if: matrix.target != 'win-arm64'
+        uses: matbour/setup-sentry-cli@3e938c54b3018bdd019973689ef984e033b0454b
+        with:
+          token: ${{ secrets.SENTRY_AUTH_TOKEN }}
+
+      - name: Clear target directory if large
+        if: startsWith(matrix.target, 'mac-')
+        shell: bash
+        run: ./script/clear-target-dir-if-larger-than 80 40
+
+      - name: Clear target directory if large
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: ./script/clear-target-dir-if-larger-than.ps1 350 200
+
+      - name: Build Linux x64 release
+        if: matrix.target == 'linux-x64'
+        shell: bash
+        env:
+          CC: clang-18
+          CXX: clang++-18
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          SKIP_GENERATE_LICENSES: "true"
+        run: ./script/bundle-linux
+
+      - name: Build Linux arm64 release
+        if: matrix.target == 'linux-arm64'
+        shell: bash
+        env:
+          CC: clang-18
+          CXX: clang++-18
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          SKIP_GENERATE_LICENSES: "true"
+        run: ./script/bundle-linux
+
+      - name: Build macOS arm64 release
+        if: matrix.target == 'mac-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_retryable_apple_failure() {
+            local log_path="$1"
+            grep -Fq \
+              -e "The timestamp service is not available." \
+              -e "Failed to notarize via notarytool." \
+              -e "The request timed out." \
+              -e "NSURLErrorDomain Code=-1001" \
+              "$log_path"
+          }
+
+          run_retryable_apple_build() {
+            local log_slug="$1"
+            local target_triple="$2"
+            local max_attempts="${3:-3}"
+            local attempt=1
+            local sleep_seconds=20
+            local log_path status
+
+            while true; do
+              log_path="${RUNNER_TEMP}/${log_slug}-attempt-${attempt}.log"
+              echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
+
+              set +e
+              SKIP_GENERATE_LICENSES=true ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              status=${PIPESTATUS[0]}
+              set -e
+
+              if [[ "$status" -eq 0 ]]; then
+                return 0
+              fi
+
+              if ! is_retryable_apple_failure "$log_path"; then
+                echo "::error title=Build macOS::non-retryable failure on attempt ${attempt}/${max_attempts}"
+                return "$status"
+              fi
+
+              if [[ "$attempt" -ge "$max_attempts" ]]; then
+                echo "::error title=Build macOS::Apple signing/notary services remained unavailable after ${max_attempts} attempts"
+                return "$status"
+              fi
+
+              echo "::warning title=Build macOS retry::retryable Apple failure on attempt ${attempt}/${max_attempts}; sleeping ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+              sleep_seconds=$((sleep_seconds * 2))
+            done
+          }
+
+          run_retryable_apple_build "zed-macos-arm64-build" "aarch64-apple-darwin" 4
+
+      - name: Build macOS x64 release
+        if: matrix.target == 'mac-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          is_retryable_apple_failure() {
+            local log_path="$1"
+            grep -Fq \
+              -e "The timestamp service is not available." \
+              -e "Failed to notarize via notarytool." \
+              -e "The request timed out." \
+              -e "NSURLErrorDomain Code=-1001" \
+              "$log_path"
+          }
+
+          run_retryable_apple_build() {
+            local log_slug="$1"
+            local target_triple="$2"
+            local max_attempts="${3:-3}"
+            local attempt=1
+            local sleep_seconds=20
+            local log_path status
+
+            while true; do
+              log_path="${RUNNER_TEMP}/${log_slug}-attempt-${attempt}.log"
+              echo "::notice title=Build macOS::${target_triple} attempt ${attempt}/${max_attempts}"
+
+              set +e
+              SKIP_GENERATE_LICENSES=true ./script/bundle-mac "$target_triple" 2>&1 | tee "$log_path"
+              status=${PIPESTATUS[0]}
+              set -e
+
+              if [[ "$status" -eq 0 ]]; then
+                return 0
+              fi
+
+              if ! is_retryable_apple_failure "$log_path"; then
+                echo "::error title=Build macOS::non-retryable failure on attempt ${attempt}/${max_attempts}"
+                return "$status"
+              fi
+
+              if [[ "$attempt" -ge "$max_attempts" ]]; then
+                echo "::error title=Build macOS::Apple signing/notary services remained unavailable after ${max_attempts} attempts"
+                return "$status"
+              fi
+
+              echo "::warning title=Build macOS retry::retryable Apple failure on attempt ${attempt}/${max_attempts}; sleeping ${sleep_seconds}s"
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+              sleep_seconds=$((sleep_seconds * 2))
+            done
+          }
+
+          run_retryable_apple_build "zed-macos-x64-build" "x86_64-apple-darwin" 4
+
+      - name: Verify macOS arm64 signatures
+        if: matrix.target == 'mac-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/aarch64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          dmg_path="$(find target/aarch64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
+
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/aarch64-apple-darwin/release"; exit 1; }
+          [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/aarch64-apple-darwin/release"; exit 1; }
+
+          codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-arm64-app-sign.txt
+          codesign -dv --verbose=4 "$dmg_path" 2>&1 | tee /tmp/zed-mac-arm64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/zed-mac-arm64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/zed-mac-arm64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/zed-mac-arm64-app-sign.txt
+
+          spctl -a -vvv "$app_path"
+          xcrun stapler validate "$dmg_path"
+
+      - name: Verify macOS x64 signatures
+        if: matrix.target == 'mac-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find target/x86_64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          dmg_path="$(find target/x86_64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
+
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/x86_64-apple-darwin/release"; exit 1; }
+          [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/x86_64-apple-darwin/release"; exit 1; }
+
+          codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-x64-app-sign.txt
+          codesign -dv --verbose=4 "$dmg_path" 2>&1 | tee /tmp/zed-mac-x64-dmg-sign.txt
+
+          grep -q "Authority=Developer ID Application" /tmp/zed-mac-x64-app-sign.txt
+          grep -q "TeamIdentifier=" /tmp/zed-mac-x64-app-sign.txt
+          ! grep -q "Signature=adhoc" /tmp/zed-mac-x64-app-sign.txt
+
+          spctl -a -vvv "$app_path"
+          xcrun stapler validate "$dmg_path"
+
+      - name: Build Windows arm64 release
+        if: matrix.target == 'win-arm64'
+        shell: pwsh
+        working-directory: ${{ env.ZED_WORKSPACE }}
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SKIP_GENERATE_LICENSES: "true"
+          SKIP_WINDOWS_SIGNING: "true"
+        run: script/bundle-windows.ps1 -Architecture aarch64
+
+      - name: Build Windows x64 release
+        if: matrix.target == 'win-x64'
+        shell: pwsh
+        working-directory: ${{ env.ZED_WORKSPACE }}
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SKIP_GENERATE_LICENSES: "true"
+          SKIP_WINDOWS_SIGNING: "true"
+        run: script/bundle-windows.ps1 -Architecture x86_64
+
+      - name: Collect release files
+        if: ${{ !startsWith(matrix.target, 'win-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target="${{ matrix.target }}"
+          upload_dir="${RUNNER_TEMP}/release-upload/${target}"
+          rm -rf "$upload_dir"
+          mkdir -p "$upload_dir"
+
+          case "$target" in
+            linux-x64)
+              files=(
+                "target/release/codei-linux-x86_64.tar.gz"
+                "target/codei-remote-server-linux-x86_64.gz"
+              )
+              ;;
+            linux-arm64)
+              files=(
+                "target/release/codei-linux-aarch64.tar.gz"
+                "target/codei-remote-server-linux-aarch64.gz"
+              )
+              ;;
+            mac-arm64)
+              files=(
+                "target/aarch64-apple-darwin/release/codei-aarch64.dmg"
+                "target/codei-remote-server-macos-aarch64.gz"
+              )
+              ;;
+            mac-x64)
+              files=(
+                "target/x86_64-apple-darwin/release/codei-x86_64.dmg"
+                "target/codei-remote-server-macos-x86_64.gz"
+              )
+              ;;
+            *)
+              echo "unsupported target: $target"
+              exit 1
+              ;;
+          esac
+
+          for file in "${files[@]}"; do
+            [[ -f "$file" ]] || {
+              echo "missing release file: $file"
+              exit 1
+            }
+            cp "$file" "$upload_dir/"
+          done
+
+      - name: Collect release files
+        if: startsWith(matrix.target, 'win-')
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $uploadDir = Join-Path $env:RUNNER_TEMP (Join-Path "release-upload" $target)
+          if (Test-Path $uploadDir) {
+            Remove-Item -Recurse -Force $uploadDir
+          }
+          New-Item -ItemType Directory -Force -Path $uploadDir | Out-Null
+
+          switch ($target) {
+            "win-arm64" {
+              $files = @(
+                "target/codei-aarch64.exe",
+                "target/codei-remote-server-windows-aarch64.zip"
+              )
+            }
+            "win-x64" {
+              $files = @(
+                "target/codei-x86_64.exe",
+                "target/codei-remote-server-windows-x86_64.zip"
+              )
+            }
+            default {
+              throw "unsupported target: $target"
+            }
+          }
+
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "missing release file: $file"
+            }
+            Copy-Item -Path $file -Destination (Join-Path $uploadDir (Split-Path $file -Leaf)) -Force
+          }
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-upload/${{ matrix.target }}
+          if-no-files-found: error
+
+  publish_release:
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-artifacts
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version='${{ needs.resolve.outputs.version }}'
+          channel='${{ needs.resolve.outputs.channel }}'
+          release_repo='${{ needs.resolve.outputs.release_repo }}'
+          tag="v${version}"
+          if [[ "$channel" != "stable" ]]; then
+            tag="v${version}-${channel}"
+          fi
+
+          gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$release_repo" --title "$tag" --notes "Automated Zed release for $tag"
+
+          mapfile -t assets < <(find "${RUNNER_TEMP}/release-artifacts" -type f | sort)
+          [[ "${#assets[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+
+          gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
