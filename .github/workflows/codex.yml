@@ -1586,6 +1586,16 @@ jobs:
           if [[ "${#enabled_features[@]}" -gt 0 ]]; then
             feature_args=(--features "$(IFS=,; echo "${enabled_features[*]}")")
           fi
+          acp_manifest="${GITHUB_WORKSPACE}/build-src/codex-acp/Cargo.toml"
+          build_acp() {
+            echo "Building optional codex-acp for ${TARGET}"
+            "${cargo_bin}" build --manifest-path "$acp_manifest" --target "${TARGET}" --release "${timings[@]}"
+            local acp_binary="${CARGO_TARGET_DIR}/${TARGET}/release/codex-acp"
+            [[ -x "$acp_binary" ]] || {
+              echo "codex-acp binary missing after build: $acp_binary" >&2
+              exit 1
+            }
+          }
           if [[ "${TARGET}" == *-unknown-linux-* ]]; then
             # Timings add extra I/O on a slow/constrained runner; not worth it
             # for the flakiest target.
@@ -1599,20 +1609,20 @@ jobs:
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin bwrap
             fi
             if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-              "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+              build_acp
             fi
           else
             if [[ "${#feature_args[@]}" -gt 0 ]]; then
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" "${feature_args[@]}" -p codex-cli
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
               if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-                "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+                build_acp
               fi
             else
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" -p codex-cli
               "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}" --bin codex-responses-api-proxy
               if [[ "${CODEX_RELEASE_ENABLE_ACP}" == "true" ]]; then
-                "${cargo_bin}" build --manifest-path ../codex-acp/Cargo.toml --target "${TARGET}" --release "${timings[@]}"
+                build_acp
               fi
             fi
           fi
@@ -1641,6 +1651,18 @@ jobs:
           if ($enabledFeatures.Count -gt 0) {
             $featureArgs = @("--features", ($enabledFeatures -join ","))
           }
+          $acpManifest = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-acp/Cargo.toml"
+          function Build-Acp {
+            Write-Host "Building optional codex-acp for $env:TARGET"
+            cargo build --manifest-path $acpManifest --target $env:TARGET --release --timings
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            $acpBinary = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET/release/codex-acp.exe"
+            if (-not (Test-Path $acpBinary)) {
+              throw "codex-acp binary missing after build: $acpBinary"
+            }
+          }
 
           if ($featureArgs.Count -gt 0) {
             cargo build --target $env:TARGET --release --timings @featureArgs -p codex-cli
@@ -1655,10 +1677,7 @@ jobs:
               exit $LASTEXITCODE
             }
             if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
-              cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
-              if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
-              }
+              Build-Acp
             }
           } else {
             cargo build --target $env:TARGET --release --timings -p codex-cli
@@ -1673,10 +1692,7 @@ jobs:
               exit $LASTEXITCODE
             }
             if ($env:CODEX_RELEASE_ENABLE_ACP -eq "true") {
-              cargo build --manifest-path ../codex-acp/Cargo.toml --target $env:TARGET --release --timings
-              if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
-              }
+              Build-Acp
             }
           }
 
@@ -1816,6 +1832,7 @@ jobs:
         with:
           project-root: build-src/codex-rs
           target: ${{ env.TARGET }}
+          include-acp: ${{ env.CODEX_RELEASE_ENABLE_ACP }}
           sign-binaries: "true"
           sign-dmg: "false"
           apple-certificate: ${{ secrets.APPLE_CERTIFICATE_P12 }}
