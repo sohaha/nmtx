@@ -1602,7 +1602,7 @@ jobs:
           timings=(--timings)
           enabled_features=()
           if [[ "${CODEX_RELEASE_ENABLE_AWS_AUTH}" == "true" ]]; then
-            enabled_features+=(aws-auth)
+            enabled_features+=(amazon-bedrock)
           fi
           if [[ "${CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS}" == "true" ]]; then
             enabled_features+=(semantic-embeddings)
@@ -1667,7 +1667,7 @@ jobs:
 
           $enabledFeatures = @()
           if ($env:CODEX_RELEASE_ENABLE_AWS_AUTH -eq "true") {
-            $enabledFeatures += "aws-auth"
+            $enabledFeatures += "amazon-bedrock"
           }
           if ($env:CODEX_RELEASE_ENABLE_SEMANTIC_EMBEDDINGS -eq "true") {
             $enabledFeatures += "semantic-embeddings"
