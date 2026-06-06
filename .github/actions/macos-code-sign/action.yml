@@ -144,7 +144,8 @@ runs:
           exit 1
         fi
 
-        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+        target_root="${CARGO_TARGET_DIR:-${{ inputs.project-root }}/target}"
+        release_dir="${target_root}/${{ inputs.target }}/release"
 
         keychain_args=()
         if [[ -n "${APPLE_CODESIGN_KEYCHAIN:-}" && -f "${APPLE_CODESIGN_KEYCHAIN}" ]]; then
@@ -346,7 +347,8 @@ runs:
           fi
         done
 
-        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+        target_root="${CARGO_TARGET_DIR:-${{ inputs.project-root }}/target}"
+        release_dir="${target_root}/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
         write_notary_key "$notary_key_path"
         cleanup_notary() {
@@ -534,7 +536,8 @@ runs:
           fi
         done
 
-        release_dir="${{ inputs.project-root }}/target/${{ inputs.target }}/release"
+        target_root="${CARGO_TARGET_DIR:-${{ inputs.project-root }}/target}"
+        release_dir="${target_root}/${{ inputs.target }}/release"
         notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
         dmg_path="${release_dir}/codex-${{ inputs.target }}.dmg"
         write_notary_key "$notary_key_path"
