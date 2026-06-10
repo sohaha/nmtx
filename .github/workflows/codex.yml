@@ -2197,12 +2197,25 @@ jobs:
           fi
           rm -rf "$build_root"
           git init "$build_root"
-          git \
+          max_retries=3
+          retry=0
+          until git \
             -C "$build_root" \
             -c credential.helper= \
             -c core.askPass= \
             "${auth_args[@]}" \
-            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"; do
+            retry=$((retry + 1))
+            if [[ $retry -ge $max_retries ]]; then
+              echo "::error::git fetch failed after $max_retries attempts"
+              exit 1
+            fi
+            backoff=$((retry * 30))
+            echo "::warning::git fetch attempt $retry/$max_retries failed, retrying in ${backoff}s..."
+            sleep "$backoff"
+            rm -rf "$build_root"
+            git init "$build_root"
+          done
           git -C "$build_root" checkout --force FETCH_HEAD
 
       - name: Verify release artifacts
@@ -2272,6 +2285,79 @@ jobs:
             echo "stage_npm_packages.py failed on attempt ${attempt}; retrying in ${sleep_seconds}s" >&2
             sleep "${sleep_seconds}"
             attempt=$((attempt + 1))
+          done
+
+
+      - name: Stage ACP npm packages
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' && needs.resolve.outputs.enable_acp == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION}"
+          output_dir="${GITHUB_WORKSPACE}/dist/npm"
+          mkdir -p "${output_dir}"
+
+          declare -A target_to_platform=(
+            [x86_64-unknown-linux-musl]=linux-x64
+            [aarch64-unknown-linux-musl]=linux-arm64
+            [x86_64-unknown-linux-gnu]=linux-x64
+            [aarch64-unknown-linux-gnu]=linux-arm64
+            [x86_64-apple-darwin]=darwin-x64
+            [aarch64-apple-darwin]=darwin-arm64
+            [x86_64-pc-windows-msvc]=win32-x64
+            [aarch64-pc-windows-msvc]=win32-arm64
+          )
+
+          shopt -s nullglob
+          for target_dir in dist/*/; do
+            target="${target_dir%/}"
+            target="${target#dist/}"
+            platform="${target_to_platform[$target]:-}"
+            [[ -n "$platform" ]] || continue
+
+            ext=""
+            [[ "$target" == *-msvc ]] && ext=".exe"
+
+            acp_binary="dist/${target}/codex-acp-${target}${ext}"
+            [[ -f "$acp_binary" ]] || {
+              echo "no ACP binary for ${target}, skipping"
+              continue
+            }
+
+            workdir="$(mktemp -d)"
+            pkg_dir="${workdir}/package"
+            mkdir -p "${pkg_dir}/vendor/${target}"
+
+            cp "${acp_binary}" "${pkg_dir}/vendor/${target}/codex-acp${ext}"
+            chmod +x "${pkg_dir}/vendor/${target}/codex-acp${ext}"
+
+            os=""
+            cpu=""
+            case "${platform}" in
+              linux-*)  os="linux";  cpu="${platform#linux-}" ;;
+              darwin-*) os="darwin"; cpu="${platform#darwin-}" ;;
+              win32-*)  os="win32";  cpu="${platform#win32-}" ;;
+            esac
+
+            node -e "
+              const fs = require('fs');
+              const pj = {
+                name: '@sohaha/zcodex',
+                version: process.argv[1],
+                license: 'Apache-2.0',
+                os: [process.argv[2]],
+                cpu: [process.argv[3]],
+                files: ['vendor'],
+                repository: { type: 'git', url: 'https://github.com/sohaha/nmtx' },
+                engines: { node: '>=18' }
+              };
+              fs.writeFileSync(process.argv[4], JSON.stringify(pj, null, 2) + '\n');
+            " "${version}-acp-${platform}" "${os}" "${cpu}" "${pkg_dir}/package.json"
+
+            tarball_name="codex-npm-acp-${platform}-${version}.tgz"
+            tar -czf "${output_dir}/${tarball_name}" -C "${workdir}" package
+            rm -rf "${workdir}"
+            echo "ACP npm tarball: ${output_dir}/${tarball_name}"
           done
 
       - name: Normalize npm package repository metadata
@@ -2427,6 +2513,7 @@ jobs:
             "codex-npm-linux-*-${version}.tgz"
             "codex-npm-darwin-*-${version}.tgz"
             "codex-npm-win32-*-${version}.tgz"
+            "codex-npm-acp-*-${version}.tgz"
           )
 
           for pattern in "${patterns[@]}"; do
@@ -2506,6 +2593,11 @@ jobs:
                 platform="${filename#codex-npm-}"
                 platform="${platform%-${RELEASE_VERSION}.tgz}"
                 tag="${prefix}${platform}"
+                ;;
+              codex-npm-acp-*-"${RELEASE_VERSION}".tgz)
+                platform="${filename#codex-npm-acp-}"
+                platform="${platform%-${RELEASE_VERSION}.tgz}"
+                tag="${prefix}acp-${platform}"
                 ;;
               codex-npm-"${RELEASE_VERSION}".tgz)
                 tag="${NPM_TAG}"
