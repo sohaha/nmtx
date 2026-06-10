@@ -18,7 +18,9 @@ on:
       target:
         required: true
         type: choice
+        default: all
         options:
+          - all
           - win-x64
           - win-arm64
           - linux-x64
@@ -41,7 +43,7 @@ on:
       release_repo:
         required: true
         type: string
-        default: sohaha/codexi-releases
+        default: sohaha/codei-releases
 
 permissions:
   contents: read
