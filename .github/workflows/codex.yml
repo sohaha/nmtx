@@ -61,7 +61,7 @@ name: Build Codex Release
       enable_acp:
         required: false
         type: boolean
-        default: false
+        default: true
         description: Build and package the optional codex-acp binary.
 
 permissions:
