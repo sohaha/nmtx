@@ -2287,6 +2287,70 @@ jobs:
             attempt=$((attempt + 1))
           done
 
+      - name: Repair Codex npm launcher bins
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tarball="${GITHUB_WORKSPACE}/dist/npm/codex-npm-${RELEASE_VERSION}.tgz"
+          [[ -f "$tarball" ]] || {
+            echo "missing Codex npm tarball: $tarball" >&2
+            exit 1
+          }
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+
+          tar -xzf "$tarball" -C "$workdir"
+
+          package_json="${workdir}/package/package.json"
+          mapfile -t bin_entries < <(
+            PACKAGE_JSON="$package_json" node -e '
+              const fs = require("fs");
+              const pkg = JSON.parse(fs.readFileSync(process.env.PACKAGE_JSON, "utf8"));
+              const bin = pkg.bin;
+              if (typeof bin === "string") {
+                console.log(`${pkg.name}\t${bin}`);
+              } else if (bin && typeof bin === "object") {
+                for (const [name, relPath] of Object.entries(bin)) {
+                  console.log(`${name}\t${relPath}`);
+                }
+              }
+            '
+          )
+
+          for entry in "${bin_entries[@]}"; do
+            bin_name="${entry%%$'\t'*}"
+            rel_path="${entry#*$'\t'}"
+            dest="${workdir}/package/${rel_path}"
+
+            if [[ -f "$dest" ]]; then
+              continue
+            fi
+
+            src="${GITHUB_WORKSPACE}/build-src/codex-cli/${rel_path}"
+            [[ -f "$src" ]] || {
+              echo "npm bin '${bin_name}' points to missing file: ${rel_path}" >&2
+              echo "source launcher also missing: ${src}" >&2
+              exit 1
+            }
+
+            mkdir -p "$(dirname "$dest")"
+            cp "$src" "$dest"
+          done
+
+          for entry in "${bin_entries[@]}"; do
+            bin_name="${entry%%$'\t'*}"
+            rel_path="${entry#*$'\t'}"
+            [[ -f "${workdir}/package/${rel_path}" ]] || {
+              echo "npm bin '${bin_name}' still missing after repair: ${rel_path}" >&2
+              exit 1
+            }
+          done
+
+          tar -czf "$tarball" -C "$workdir" package
+
 
       - name: Stage ACP npm packages
         if: ${{ needs.resolve.outputs.should_publish_npm == 'true' && needs.resolve.outputs.enable_acp == 'true' }}
