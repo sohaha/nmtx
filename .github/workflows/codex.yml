@@ -1583,6 +1583,24 @@ jobs:
           "CARGO_PROFILE_RELEASE_PANIC=abort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_PROFILE_RELEASE_OPT_LEVEL=s" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Free disk on Linux runner
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Disk usage before cleanup:"
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/share/dotnet
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          docker system prune -af || true
+          echo "Disk usage after cleanup:"
+          df -h /
+
       - name: Enable swap on Linux runner
         if: ${{ runner.os == 'Linux' }}
         shell: bash
