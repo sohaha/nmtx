@@ -149,7 +149,12 @@ runs:
         fi
 
         codex_entitlements="${GITHUB_ACTION_PATH}/codex.entitlements.plist"
-        for binary in codex codex-responses-api-proxy; do
+        binaries=(codex codex-responses-api-proxy)
+        if [[ "${CODEX_RELEASE_ENABLE_ACP:-false}" == "true" ]]; then
+          binaries+=(codex-acp)
+        fi
+
+        for binary in "${binaries[@]}"; do
           path="${release_dir}/${binary}"
           if [[ ! -f "$path" ]]; then
             echo "Binary $path not found"
@@ -365,8 +370,14 @@ runs:
           notarize_submission "$binary" "$archive_path" "$notary_key_path"
         }
 
-        notarize_binary "codex"
-        notarize_binary "codex-responses-api-proxy"
+        binaries=(codex codex-responses-api-proxy)
+        if [[ "${CODEX_RELEASE_ENABLE_ACP:-false}" == "true" ]]; then
+          binaries+=(codex-acp)
+        fi
+
+        for binary in "${binaries[@]}"; do
+          notarize_binary "$binary"
+        done
 
     - name: Sign and notarize macOS dmg
       if: ${{ inputs.sign-dmg == 'true' }}

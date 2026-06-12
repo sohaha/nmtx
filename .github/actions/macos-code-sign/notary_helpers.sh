@@ -69,6 +69,12 @@ notarize_submission() {
   echo "::notice title=Notarization::$label submission ${submission_id} completed with status ${status}"
 
   if [[ "$status" != "Accepted" ]]; then
+    echo "::group::Notarization log for ${label}"
+    xcrun notarytool log "$submission_id" \
+      --key "$notary_key_path" \
+      --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+      --issuer "$APPLE_NOTARIZATION_ISSUER_ID" || true
+    echo "::endgroup::"
     echo "Notarization failed for ${label} (submission ${submission_id}, status ${status})"
     exit 1
   fi
