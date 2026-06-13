@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_repo: ${{ steps.payload.outputs.source_repo }}
-      source_sha: ${{ steps.payload.outputs.source_sha }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.payload.outputs.version }}
       targets: ${{ steps.targets.outputs.targets }}
       channel: ${{ steps.payload.outputs.channel }}
@@ -99,14 +99,49 @@ jobs:
 
       - name: Validate payload
         shell: bash
+        env:
+          SOURCE_REPO: ${{ steps.payload.outputs.source_repo }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_sha }}
+          VERSION: ${{ steps.payload.outputs.version }}
+          CHANNEL: ${{ steps.payload.outputs.channel }}
+          RELEASE_REPO: ${{ steps.payload.outputs.release_repo }}
         run: |
           set -euo pipefail
 
-          [[ "${{ steps.payload.outputs.source_repo }}" == "sohaha/zed" ]] || exit 1
-          [[ "${{ steps.payload.outputs.release_repo }}" == "sohaha/codei-releases" ]] || exit 1
-          [[ "${{ steps.payload.outputs.source_sha }}" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "${{ steps.payload.outputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
-          [[ "${{ steps.payload.outputs.channel }}" =~ ^(stable|preview|nightly|dev)$ ]] || exit 1
+          [[ "$SOURCE_REPO" == "sohaha/zed" ]] || exit 1
+          [[ "$RELEASE_REPO" == "sohaha/codei-releases" ]] || exit 1
+          [[ "$SOURCE_REF" =~ ^[0-9A-Za-z._/-]+$ ]] || exit 1
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || exit 1
+          [[ "$CHANNEL" =~ ^(stable|preview|nightly|dev)$ ]] || exit 1
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ steps.payload.outputs.source_repo }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_sha }}
+          SOURCE_TOKEN: ${{ secrets.CODEBAY_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            source_sha="$SOURCE_REF"
+          else
+            source_url="https://github.com/${SOURCE_REPO}.git"
+            basic_auth_token="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\n')"
+            source_sha="$(
+              git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" \
+                ls-remote "$source_url" "refs/heads/$SOURCE_REF" "refs/tags/$SOURCE_REF" "$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Unable to resolve source ref '$SOURCE_REF' in $SOURCE_REPO" >&2
+            exit 1
+          }
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Normalize targets
         id: targets
