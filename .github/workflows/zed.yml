@@ -920,10 +920,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/aarch64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          find_macos_app() {
+            local target_triple="$1"
+            local roots=(
+              "crates/zed/target/${target_triple}/release/bundle/osx"
+              "target/${target_triple}/release/bundle/osx"
+              "target/${target_triple}/release"
+            )
+
+            for root in "${roots[@]}"; do
+              [[ -d "$root" ]] || continue
+              find "$root" -maxdepth 4 -type d -iname 'codei*.app'
+            done | head -n 1
+          }
+
+          app_path="$(find_macos_app aarch64-apple-darwin)"
           dmg_path="$(find target/aarch64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
 
-          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/aarch64-apple-darwin/release"; exit 1; }
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under crates/zed/target or target for aarch64-apple-darwin"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/aarch64-apple-darwin/release"; exit 1; }
 
           codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-arm64-app-sign.txt
@@ -941,10 +955,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find target/x86_64-apple-darwin/release -maxdepth 3 -type d -name 'codei*.app' | head -n 1)"
+          find_macos_app() {
+            local target_triple="$1"
+            local roots=(
+              "crates/zed/target/${target_triple}/release/bundle/osx"
+              "target/${target_triple}/release/bundle/osx"
+              "target/${target_triple}/release"
+            )
+
+            for root in "${roots[@]}"; do
+              [[ -d "$root" ]] || continue
+              find "$root" -maxdepth 4 -type d -iname 'codei*.app'
+            done | head -n 1
+          }
+
+          app_path="$(find_macos_app x86_64-apple-darwin)"
           dmg_path="$(find target/x86_64-apple-darwin/release -maxdepth 1 -type f -name 'codei-*.dmg' | head -n 1)"
 
-          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under target/x86_64-apple-darwin/release"; exit 1; }
+          [[ -n "$app_path" && -d "$app_path" ]] || { echo "missing app bundle under crates/zed/target or target for x86_64-apple-darwin"; exit 1; }
           [[ -n "$dmg_path" && -f "$dmg_path" ]] || { echo "missing dmg under target/x86_64-apple-darwin/release"; exit 1; }
 
           codesign -dv --verbose=4 "$app_path" 2>&1 | tee /tmp/zed-mac-x64-app-sign.txt
