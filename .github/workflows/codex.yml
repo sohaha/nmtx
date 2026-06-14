@@ -1071,7 +1071,10 @@ jobs:
               "                    request.sandbox_permissions",
               "                },",
           ]) + "\n"
-          current = "\n".join([
+          precomputed = "\n".join([
+              "                sandbox_permissions: approval_sandbox_permissions,",
+          ]) + "\n"
+          source_patched = "\n".join([
               "        let approval_sandbox_permissions = request.sandbox_permissions;",
               "        #[cfg(unix)]",
               "        let approval_sandbox_permissions = if request.additional_permissions_preapproved {",
@@ -1080,11 +1083,17 @@ jobs:
               "            approval_sandbox_permissions",
               "        };",
           ]) + "\n"
-          if legacy in text:
-              path.write_text(text.replace(legacy, current), encoding="utf-8")
-              print("patched legacy Unix-only additional permissions preapproval")
+          if legacy in text and source_patched in text:
+              path.write_text(text.replace(legacy, precomputed, 1), encoding="utf-8")
+              print("patched approval request to reuse precomputed sandbox permissions")
+          elif legacy in text:
+              path.write_text(text.replace(legacy, source_patched + legacy, 1), encoding="utf-8")
+              path.write_text(path.read_text(encoding="utf-8").replace(legacy, precomputed, 1), encoding="utf-8")
+              print("inserted precomputed sandbox permissions and patched approval request")
+          elif precomputed in text:
+              print("approval request already reuses precomputed sandbox permissions")
           elif current in text:
-              print("Unix-only additional permissions preapproval already present in current form")
+              print("approval request uses raw cfg(unix) let; keeping as-is")
           else:
               raise SystemExit("target block not found in process_manager.rs")
           PY
@@ -1641,7 +1650,10 @@ jobs:
           acp_manifest="${GITHUB_WORKSPACE}/build-src/codex-acp/Cargo.toml"
           build_acp() {
             echo "Building optional codex-acp for ${TARGET}"
-            "${cargo_bin}" build --manifest-path "$acp_manifest" --target "${TARGET}" --release "${timings[@]}"
+            local previous_dir="$(pwd)"
+            cd "${GITHUB_WORKSPACE}/build-src/codex-acp" || exit 1
+            "${cargo_bin}" update -p allocative --precise 0.3.6
+            "${cargo_bin}" build --target "${TARGET}" --release "${timings[@]}"
             local acp_binary="${CARGO_TARGET_DIR}/${TARGET}/release/codex-acp"
             [[ -x "$acp_binary" ]] || {
               echo "codex-acp binary missing after build: $acp_binary" >&2
@@ -1709,10 +1721,16 @@ jobs:
           $acpManifest = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-acp/Cargo.toml"
           function Build-Acp {
             Write-Host "Building optional codex-acp for $env:TARGET"
-            cargo build --manifest-path $acpManifest --target $env:TARGET --release --timings
+            $previousDir = (Get-Location).Path
+            $acpRoot = Join-Path $env:GITHUB_WORKSPACE "build-src/codex-acp"
+            Set-Location $acpRoot
+            cargo update -p allocative --precise 0.3.6
+            cargo build --target $env:TARGET --release --timings
             if ($LASTEXITCODE -ne 0) {
+              Set-Location $previousDir
               exit $LASTEXITCODE
             }
+            Set-Location $previousDir
             $acpBinary = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET/release/codex-acp.exe"
             if (-not (Test-Path $acpBinary)) {
               throw "codex-acp binary missing after build: $acpBinary"
