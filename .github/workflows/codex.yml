@@ -1149,6 +1149,16 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
 
+      - name: Ensure Rust target installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_file="${GITHUB_WORKSPACE}/build-src/codex-rs/rust-toolchain.toml"
+          channel="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' "${toolchain_file}")"
+          if ! rustup target list --toolchain "${channel}" --installed | grep -qx "${TARGET}"; then
+            rustup target add "${TARGET}" --toolchain "${channel}"
+          fi
+
       - name: Use git CLI for Cargo git dependencies
         if: ${{ runner.os == 'macOS' }}
         shell: bash
