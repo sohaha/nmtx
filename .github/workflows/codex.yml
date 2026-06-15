@@ -1903,6 +1903,20 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
 
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          # Free disk space before creating the dmg image. macOS Intel runners
+          # have a small disk and the incremental build cache can fill it up,
+          # causing hdiutil to fail with "No space left on device".
+          du -sh "${CARGO_TARGET_DIR}/${TARGET}" 2>/dev/null || true
+          df -h /
+          rm -rf \
+            "${CARGO_TARGET_DIR}/${TARGET}/build" \
+            "${CARGO_TARGET_DIR}/${TARGET}/.fingerprint" \
+            "${CARGO_TARGET_DIR}/${TARGET}/deps" \
+            "${CARGO_TARGET_DIR}/${TARGET}/examples" \
+            "${CARGO_TARGET_DIR}/${TARGET}/incremental"
+          echo "Cleaned intermediate build artifacts for ${TARGET}"
+          df -h /
+
           dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           dmg_path="${release_dir}/codex-${TARGET}.dmg"
           tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
@@ -1953,6 +1967,11 @@ jobs:
             rm -f "$tmp_dmg_path"
             sleep 5
           done
+          # The final dmg is all we need; drop the rest of the release
+          # directory to keep the upload-artifact step lean.
+          find "${release_dir}" -mindepth 1 -maxdepth 1 \
+            ! -name "codex-${TARGET}.dmg" \
+            -exec rm -rf {} +
 
           [[ -f "$dmg_path" ]] || {
             echo "dmg $dmg_path not found after build"
