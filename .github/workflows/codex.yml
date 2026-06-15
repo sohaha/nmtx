@@ -906,6 +906,8 @@ jobs:
               BunGlobalLatest,
               /// Update via `brew upgrade codex`.
               BrewUpgrade,
+              /// Update via standalone Unix shell installer.
+              StandaloneUnix,
           }
 
           impl UpdateAction {
@@ -916,6 +918,7 @@ jobs:
                       UpdateAction::StandaloneWindows => ("powershell", &["-NoProfile", "-Command", "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-Expression ((Invoke-WebRequest -UseBasicParsing 'https://cnb.cool/zcodex_install.ps1').Content) }"]),
                       UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@sohaha/zcodex"]),
                       UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
+                      UpdateAction::StandaloneUnix => ("sh", &["-c", "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"]),
                   }
               }
 
@@ -1044,6 +1047,9 @@ jobs:
               print("updates source not found; skip StandaloneWindows match patch")
               raise SystemExit(0)
           text = path.read_text(encoding="utf-8")
+          if "Some(UpdateAction::StandaloneUnix)" in text and "Some(UpdateAction::StandaloneWindows)" in text:
+              print("updates.rs already handles standalone Unix and Windows")
+              raise SystemExit(0)
           standalone_arm = "        Some(UpdateAction::StandaloneWindows) => fetch_latest_github_release_version().await?,\n"
           if standalone_arm in text:
               print("updates.rs already handles StandaloneWindows")
