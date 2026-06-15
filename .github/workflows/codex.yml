@@ -1089,26 +1089,6 @@ jobs:
               raise SystemExit("target block not found in process_manager.rs")
           PY
 
-      - name: Patch Windows active permission profile override
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("build-src/codex-rs/tui/src/app.rs")
-          text = path.read_text(encoding="utf-8")
-          old = "                                        Some(preset.permission_profile.clone()),\n"
-          new = "                                        Some(preset.active_permission_profile.clone()),\n"
-          if old in text:
-              path.write_text(text.replace(old, new, 1), encoding="utf-8")
-              print("patched Windows active permission profile override")
-          elif new in text:
-              print("Windows active permission profile override already patched")
-          else:
-              raise SystemExit("target line not found in tui/src/app.rs")
-          PY
-
       - name: Install Linux build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
