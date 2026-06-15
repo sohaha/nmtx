@@ -2245,6 +2245,28 @@ jobs:
       - uses: facebook/install-dotslash@v2
         if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
 
+      - name: Patch npm staging artifact repository
+        if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["GITHUB_WORKSPACE"]) / "build-src" / "scripts" / "stage_npm_packages.py"
+          text = path.read_text(encoding="utf-8")
+          old = 'GITHUB_REPO = "openai/codex"\n'
+          new = f'GITHUB_REPO = "{os.environ["GITHUB_REPOSITORY"]}"\n'
+          if old in text:
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print(f"patched npm staging artifact repository to {os.environ['GITHUB_REPOSITORY']}")
+          elif new in text:
+              print(f"npm staging artifact repository already set to {os.environ['GITHUB_REPOSITORY']}")
+          else:
+              raise SystemExit("stage_npm_packages.py GITHUB_REPO assignment not found")
+          PY
+
       - name: Stage npm packages
         if: ${{ needs.resolve.outputs.should_publish_npm == 'true' }}
         shell: bash
