@@ -1895,6 +1895,42 @@ jobs:
             "${release_dir}/codex-acp" --help >/dev/null
           fi
 
+
+      - name: Free disk space for macOS dmg creation
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Disk space before cleanup:"
+          df -h /
+          df -h /System/Volumes/Data 2>/dev/null || true
+
+          # Delete APFS local snapshots that lock container space and cause
+          # hdiutil to fail with "No space left on device" even when df
+          # reports plenty of free space.
+          for snap in $(tmutil listlocalsnapshots / 2>/dev/null | sed 's/com.apple.TimeMachine.*://'); do
+            tmutil deletelocalsnapshots "$snap" 2>/dev/null || true
+          done
+
+          # Purge Homebrew downloads and caches.
+          rm -rf ~/Library/Caches/Homebrew/* 2>/dev/null || true
+          rm -rf /Users/runner/Library/Caches/Homebrew/* 2>/dev/null || true
+
+          # Trim intermediate Cargo build artifacts for the current target
+          # while keeping the final release binaries intact.
+          target_root="${CARGO_TARGET_DIR}/${TARGET}"
+          rm -rf \
+            "${target_root}/build" \
+            "${target_root}/.fingerprint" \
+            "${target_root}/deps" \
+            "${target_root}/examples" \
+            "${target_root}/incremental"
+
+          # Purge other target directories that are not needed here.
+          find "${CARGO_TARGET_DIR}" -mindepth 1 -maxdepth 1 -type d \
+            ! -name "${TARGET}" \
+            -exec rm -rf {} +
+
       - name: Build macOS dmg
         if: ${{ runner.os == 'macOS' }}
         shell: bash
@@ -1903,20 +1939,6 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
 
           release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
-          # Free disk space before creating the dmg image. macOS Intel runners
-          # have a small disk and the incremental build cache can fill it up,
-          # causing hdiutil to fail with "No space left on device".
-          du -sh "${CARGO_TARGET_DIR}/${TARGET}" 2>/dev/null || true
-          df -h /
-          rm -rf \
-            "${CARGO_TARGET_DIR}/${TARGET}/build" \
-            "${CARGO_TARGET_DIR}/${TARGET}/.fingerprint" \
-            "${CARGO_TARGET_DIR}/${TARGET}/deps" \
-            "${CARGO_TARGET_DIR}/${TARGET}/examples" \
-            "${CARGO_TARGET_DIR}/${TARGET}/incremental"
-          echo "Cleaned intermediate build artifacts for ${TARGET}"
-          df -h /
-
           dmg_root="${RUNNER_TEMP}/codex-dmg-root-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           dmg_path="${release_dir}/codex-${TARGET}.dmg"
           tmp_dmg_path="${RUNNER_TEMP}/codex-${TARGET}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.dmg"
@@ -1967,17 +1989,11 @@ jobs:
             rm -f "$tmp_dmg_path"
             sleep 5
           done
-          # The final dmg is all we need; drop the rest of the release
-          # directory to keep the upload-artifact step lean.
-          find "${release_dir}" -mindepth 1 -maxdepth 1 \
-            ! -name "codex-${TARGET}.dmg" \
-            -exec rm -rf {} +
 
           [[ -f "$dmg_path" ]] || {
             echo "dmg $dmg_path not found after build"
             exit 1
           }
-
       - name: MacOS code signing (dmg)
         if: ${{ runner.os == 'macOS' }}
         uses: ./.github/actions/macos-code-sign
