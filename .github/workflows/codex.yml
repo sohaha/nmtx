@@ -2092,6 +2092,24 @@ jobs:
             }
           done
 
+      - uses: facebook/install-dotslash@v2
+        if: ${{ env.TARGET != 'x86_64-unknown-linux-gnu' && env.TARGET != 'aarch64-unknown-linux-gnu' }}
+
+      - name: Build Codex package archive
+        if: ${{ env.TARGET != 'x86_64-unknown-linux-gnu' && env.TARGET != 'aarch64-unknown-linux-gnu' }}
+        shell: bash
+        env:
+          SOURCE_ROOT: ${{ github.workspace }}/build-src
+        run: |
+          set -euo pipefail
+          cd "${SOURCE_ROOT}/codex-rs"
+          env GITHUB_WORKSPACE="${SOURCE_ROOT}" \
+            bash "${SOURCE_ROOT}/.github/scripts/build-codex-package-archive.sh" \
+              --target "$TARGET" \
+              --bundle primary \
+              --entrypoint-dir "${CARGO_TARGET_DIR}/${TARGET}/release" \
+              --archive-dir "dist/${TARGET}"
+
       - name: Enforce artifact size budget
         shell: bash
         run: |
@@ -2147,7 +2165,7 @@ jobs:
           dest="dist/${TARGET}"
           for f in "$dest"/*; do
             base="$(basename "$f")"
-            if [[ "$base" == *.tar.gz || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
+            if [[ "$base" == *.tar.gz || "$base" == *.tar.zst || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
               continue
             fi
             tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
@@ -2158,24 +2176,6 @@ jobs:
               (cd "$dest" && 7z a "${base}.zip" "$base")
             fi
           done
-
-      - name: Create npm native package archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
-          dest="dist/${TARGET}"
-          ext=""
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            ext=".exe"
-          fi
-          # stage_npm_packages.py expects codex-package-<target>.tar.gz
-          # containing the codex binary at the archive root.
-          pkg_dir="$(mktemp -d)"
-          cp "${dest}/codex-${TARGET}${ext}" "${pkg_dir}/codex${ext}"
-          tar -C "${pkg_dir}" -czf "${dest}/codex-package-${TARGET}.tar.gz" "codex${ext}"
-          rm -rf "${pkg_dir}"
-          echo "Created codex-package-${TARGET}.tar.gz"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
