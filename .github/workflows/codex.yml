@@ -1968,11 +1968,16 @@ jobs:
             ditto "$acp_binary_path" "${dmg_root}/codex-acp"
           fi
 
+          dmg_root_kib="$(du -sk "$dmg_root" | awk '{print $1}')"
+          dmg_size_mb="$((dmg_root_kib / 1024 + 1024))"
+          echo "DMG source size: ${dmg_root_kib} KiB; image size: ${dmg_size_mb} MiB"
+
           rm -f "$dmg_path" "$tmp_dmg_path"
           for attempt in 1 2 3; do
             if hdiutil create \
               -volname "$volname" \
               -srcfolder "$dmg_root" \
+              -size "${dmg_size_mb}m" \
               -format UDZO \
               -ov \
               "$tmp_dmg_path"; then
