@@ -1916,6 +1916,11 @@ jobs:
           rm -rf ~/Library/Caches/Homebrew/* 2>/dev/null || true
           rm -rf /Users/runner/Library/Caches/Homebrew/* 2>/dev/null || true
 
+          # Purge purgeable APFS space and attempt container resize so
+          # hdiutil has enough headroom to create DMG images.
+          diskutil apfs resizeContainer disk1 0 2>/dev/null || true
+          purge 2>/dev/null || true
+
           # Trim intermediate Cargo build artifacts for the current target
           # while keeping the final release binaries intact.
           target_root="${CARGO_TARGET_DIR}/${TARGET}"
@@ -1974,25 +1979,42 @@ jobs:
 
           rm -f "$dmg_path" "$tmp_dmg_path"
           for attempt in 1 2 3; do
-            if hdiutil create \
-              -volname "$volname" \
-              -srcfolder "$dmg_root" \
-              -size "${dmg_size_mb}m" \
-              -format UDZO \
-              -ov \
-              "$tmp_dmg_path"; then
+           if hdiutil create \
+             -volname "$volname" \
+             -srcfolder "$dmg_root" \
+             -size "${dmg_size_mb}m" \
+             -format UDZO \
+             -ov \
+             "$tmp_dmg_path"; then
+             mv "$tmp_dmg_path" "$dmg_path"
+             break
+           fi
+
+           if [[ "$attempt" -eq 3 ]]; then
+              echo "hdiutil create failed after ${attempt} attempts; trying sparse image fallback"
+              # Fallback: create a sparse image manually and convert to UDZO.
+              # This avoids the APFS container headroom issue on Intel runners.
+              sparse_path="${RUNNER_TEMP}/codex-${TARGET}-sparse-${GITHUB_RUN_ID}.dmg"
+              rm -f "$sparse_path" "${sparse_path}.sparseimage"
+              hdiutil create -size "${dmg_size_mb}m" -type SPARSE -fs HFS+ \
+                -volname "$volname" "${sparse_path}" || {
+                echo "failed to build dmg after ${attempt} attempts"
+                exit 1
+              }
+              mount_point="${RUNNER_TEMP}/codex-mount-${TARGET}-${GITHUB_RUN_ID}"
+              mkdir -p "$mount_point"
+              hdiutil attach "${sparse_path}.sparseimage" -mountpoint "$mount_point" -nobrowse
+              ditto "$dmg_root"/* "$mount_point"/
+              hdiutil detach "$mount_point"
+              hdiutil convert "${sparse_path}.sparseimage" -format UDZO -o "$tmp_dmg_path" -ov
+              rm -f "${sparse_path}.sparseimage"
               mv "$tmp_dmg_path" "$dmg_path"
               break
-            fi
+           fi
 
-            if [[ "$attempt" -eq 3 ]]; then
-              echo "failed to build dmg after ${attempt} attempts"
-              exit 1
-            fi
-
-            echo "hdiutil create failed on attempt ${attempt}; retrying after cleanup"
-            rm -f "$tmp_dmg_path"
-            sleep 5
+           echo "hdiutil create failed on attempt ${attempt}; retrying after cleanup"
+           rm -f "$tmp_dmg_path"
+           sleep 5
           done
 
           [[ -f "$dmg_path" ]] || {
