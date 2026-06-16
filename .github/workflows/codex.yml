@@ -2159,6 +2159,24 @@ jobs:
             fi
           done
 
+      - name: Create npm native package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src/codex-rs"
+          dest="dist/${TARGET}"
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+          # stage_npm_packages.py expects codex-package-<target>.tar.gz
+          # containing the codex binary at the archive root.
+          pkg_dir="$(mktemp -d)"
+          cp "${dest}/codex-${TARGET}${ext}" "${pkg_dir}/codex${ext}"
+          tar -C "${pkg_dir}" -czf "${dest}/codex-package-${TARGET}.tar.gz" "codex${ext}"
+          rm -rf "${pkg_dir}"
+          echo "Created codex-package-${TARGET}.tar.gz"
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
