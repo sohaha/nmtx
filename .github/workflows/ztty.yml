@@ -1,0 +1,409 @@
+name: Build Ztty Release
+
+on:
+  repository_dispatch:
+    types: [build-ztty-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: main
+        description: Ztty branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.1.27 or 0.1.27-beta.1.
+      release_tag:
+        required: false
+        type: string
+        description: Optional release tag. Defaults to v<version>.
+      release_repo:
+        required: true
+        type: string
+        default: sohaha/ztty-releases
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/ztty
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      release_tag: ${{ steps.payload.outputs.release_tag }}
+      release_repo: ${{ steps.payload.outputs.release_repo }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+          DISPATCH_RELEASE_REPO: ${{ github.event.client_payload.release_repo }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_RELEASE_REPO: ${{ inputs.release_repo }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-main}"
+            version="${DISPATCH_VERSION:-}"
+            release_tag="${DISPATCH_RELEASE_TAG:-}"
+            release_repo="${DISPATCH_RELEASE_REPO:-sohaha/ztty-releases}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+            release_tag="$INPUT_RELEASE_TAG"
+            release_repo="$INPUT_RELEASE_REPO"
+          fi
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/ztty/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+          [[ "$release_repo" == "sohaha/ztty-releases" ]] || {
+            echo "refusing to publish Ztty assets to unexpected repository: $release_repo"
+            exit 1
+          }
+
+          if [[ -z "$release_tag" ]]; then
+            release_tag="v${version}"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: $release_tag"
+            exit 1
+          }
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+            echo "release_tag=$release_tag"
+            echo "release_repo=$release_repo"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          ZTTY_RELEASE_WRITE_TOKEN: ${{ secrets.ZTTY_RELEASE_WRITE_TOKEN }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            ZTTY_RELEASE_WRITE_TOKEN \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$(
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve Ztty source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: macos-26
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch Ztty source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          git -C "$build_root" submodule update --init --recursive --depth=1
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          project_version="$(
+            xcodebuild \
+              -project "$build_root/ztty.xcodeproj" \
+              -scheme ztty \
+              -configuration Release \
+              -showBuildSettings |
+              awk -F ' = ' '/ MARKETING_VERSION = / { print $2; exit }'
+          )"
+          [[ "$project_version" == "$RELEASE_VERSION" ]] || {
+            echo "workflow version $RELEASE_VERSION does not match MARKETING_VERSION $project_version"
+            exit 1
+          }
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cert_path="${RUNNER_TEMP}/ztty-developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/ztty-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$cert_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$cert_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n1)"
+          [[ -n "$identity" ]] || {
+            echo "Developer ID Application identity was not found in APPLE_CERTIFICATE_P12"
+            exit 1
+          }
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
+      - name: Archive and export Ztty
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          output_root="${RUNNER_TEMP}/ztty-release"
+          archive_path="$output_root/ztty.xcarchive"
+          export_path="$output_root/export"
+          rm -rf "$output_root"
+          mkdir -p "$output_root"
+
+          xcodebuild \
+            -project "$build_root/ztty.xcodeproj" \
+            -scheme ztty \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$archive_path" \
+            -skipPackagePluginValidation \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $SIGNING_KEYCHAIN" \
+            archive
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$archive_path" \
+            -exportOptionsPlist "$build_root/scripts/ExportOptions.plist" \
+            -exportPath "$export_path"
+
+          app_path="$export_path/Ztty.app"
+          [[ -d "$app_path" ]] || {
+            echo "exported app was not found: $app_path"
+            exit 1
+          }
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+          echo "OUTPUT_ROOT=$output_root" >> "$GITHUB_ENV"
+
+      - name: Notarize and staple app
+        shell: bash
+        env:
+          APPLE_NOTARIZATION_KEY_P8_CONTENT: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          notary_key_path="${RUNNER_TEMP}/ztty-notary-key.p8"
+          submission_path="${OUTPUT_ROOT}/ztty-notary.zip"
+          umask 077
+          cat > "$notary_key_path" <<EOF
+          $APPLE_NOTARIZATION_KEY_P8_CONTENT
+          EOF
+          ditto -c -k --keepParent "$APP_PATH" "$submission_path"
+          xcrun notarytool submit "$submission_path" \
+            --key "$notary_key_path" \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_dir="${OUTPUT_ROOT}/publish"
+          staging_dir="${OUTPUT_ROOT}/dmg"
+          dmg_path="$publish_dir/ztty-${RELEASE_VERSION}.dmg"
+          zip_path="$publish_dir/ztty-${RELEASE_VERSION}.zip"
+          mkdir -p "$publish_dir" "$staging_dir"
+          ditto "$APP_PATH" "$staging_dir/Ztty.app"
+          ln -s /Applications "$staging_dir/Applications"
+          hdiutil create \
+            -volname "Ztty ${RELEASE_VERSION}" \
+            -srcfolder "$staging_dir" \
+            -ov \
+            -format UDZO \
+            "$dmg_path"
+          codesign --force --sign "$SIGN_IDENTITY" --keychain "$SIGNING_KEYCHAIN" --timestamp "$dmg_path"
+
+          notary_key_path="${RUNNER_TEMP}/ztty-notary-key.p8"
+          xcrun notarytool submit "$dmg_path" \
+            --key "$notary_key_path" \
+            --key-id "${{ secrets.APPLE_NOTARIZATION_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}" \
+            --wait
+          xcrun stapler staple "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+          ditto -c -k --keepParent "$APP_PATH" "$zip_path"
+
+          (
+            cd "$publish_dir"
+            shasum -a 256 "$(basename "$dmg_path")" "$(basename "$zip_path")" > SHA256SUMS
+          )
+          printf 'source: %s@%s\nversion: %s\n' "$SOURCE_URL" "$SOURCE_SHA" "$RELEASE_VERSION" > "$publish_dir/provenance.txt"
+          find "$publish_dir" -maxdepth 1 -type f -print
+          echo "PUBLISH_DIR=$publish_dir" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ztty-${{ needs.resolve.outputs.version }}
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+
+      - name: Cleanup signing material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "${SIGNING_KEYCHAIN:-}" 2>/dev/null || true
+          rm -f \
+            "${RUNNER_TEMP}/ztty-developer-id.p12" \
+            "${RUNNER_TEMP}/ztty-notary-key.p8"
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: ztty-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/ztty-release
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ZTTY_RELEASE_WRITE_TOKEN }}
+          RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Automated Ztty ${RELEASE_VERSION} release."
+            echo
+            echo "Source: [zls_nmtx/sohaha/ztty@${SOURCE_SHA}](https://cnb.cool/zls_nmtx/sohaha/ztty/-/commit/${SOURCE_SHA})"
+          } > "$notes"
+
+          gh api "repos/${RELEASE_REPO}" >/dev/null
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
+              --title "Ztty ${RELEASE_VERSION}" \
+              --notes-file "$notes"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$RELEASE_REPO" \
+            --title "Ztty ${RELEASE_VERSION}" \
+            --notes-file "$notes"
+
+          mapfile -t assets < <(find "${RUNNER_TEMP}/ztty-release" -maxdepth 1 -type f | sort)
+          [[ "${#assets[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" --clobber
