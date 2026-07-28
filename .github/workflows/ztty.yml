@@ -18,10 +18,6 @@ on:
         required: false
         type: string
         description: Optional release tag. Defaults to v<version>.
-      release_repo:
-        required: true
-        type: string
-        default: sohaha/ztty-releases
 
 permissions:
   contents: read
@@ -33,6 +29,7 @@ concurrency:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/ztty
+  RELEASE_REPO: sohaha/ztty-releases
 
 jobs:
   resolve:
@@ -42,7 +39,6 @@ jobs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.payload.outputs.version }}
       release_tag: ${{ steps.payload.outputs.release_tag }}
-      release_repo: ${{ steps.payload.outputs.release_repo }}
     steps:
       - name: Resolve payload
         id: payload
@@ -52,11 +48,9 @@ jobs:
           DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
           DISPATCH_VERSION: ${{ github.event.client_payload.version }}
           DISPATCH_RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
-          DISPATCH_RELEASE_REPO: ${{ github.event.client_payload.release_repo }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
-          INPUT_RELEASE_REPO: ${{ inputs.release_repo }}
         run: |
           set -euo pipefail
 
@@ -64,12 +58,10 @@ jobs:
             source_ref="${DISPATCH_SOURCE_REF:-main}"
             version="${DISPATCH_VERSION:-}"
             release_tag="${DISPATCH_RELEASE_TAG:-}"
-            release_repo="${DISPATCH_RELEASE_REPO:-sohaha/ztty-releases}"
           else
             source_ref="$INPUT_SOURCE_REF"
             version="$INPUT_VERSION"
             release_tag="$INPUT_RELEASE_TAG"
-            release_repo="$INPUT_RELEASE_REPO"
           fi
 
           if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/ztty/-/commit/([0-9a-f]{40})/?$ ]]; then
@@ -83,11 +75,6 @@ jobs:
             echo "invalid version: $version"
             exit 1
           }
-          [[ "$release_repo" == "sohaha/ztty-releases" ]] || {
-            echo "refusing to publish Ztty assets to unexpected repository: $release_repo"
-            exit 1
-          }
-
           if [[ -z "$release_tag" ]]; then
             release_tag="v${version}"
           fi
@@ -100,7 +87,6 @@ jobs:
             echo "source_ref=$source_ref"
             echo "version=$version"
             echo "release_tag=$release_tag"
-            echo "release_repo=$release_repo"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate required secrets
@@ -388,7 +374,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.ZTTY_RELEASE_WRITE_TOKEN }}
-          RELEASE_REPO: ${{ needs.resolve.outputs.release_repo }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
