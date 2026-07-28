@@ -240,6 +240,8 @@ jobs:
           rm -rf "$output_root"
           mkdir -p "$output_root"
 
+          # Build unsigned archive; sign with codesign after export so SPM
+          # sub-targets don't need provisioning settings.
           xcodebuild \
             -project "$build_root/ztty.xcodeproj" \
             -scheme ztty \
@@ -247,10 +249,7 @@ jobs:
             -destination 'generic/platform=macOS' \
             -archivePath "$archive_path" \
             -skipPackagePluginValidation \
-            CODE_SIGN_IDENTITY="$APPLE_CODESIGN_IDENTITY" \
-            CODE_SIGN_STYLE="Manual" \
-            DEVELOPMENT_TEAM="GJE9R5VE87" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $APPLE_CODESIGN_KEYCHAIN" \
+            CODE_SIGNING_ALLOWED=NO \
             archive
           xcodebuild \
             -exportArchive \
@@ -263,6 +262,17 @@ jobs:
             echo "exported app was not found: $app_path"
             exit 1
           }
+
+          # The archive was built unsigned (CODE_SIGNING_ALLOWED=NO) so SPM
+          # sub-targets don't conflict on provisioning settings. Sign the
+          # exported bundle here with the Developer ID identity.
+          /usr/bin/codesign \
+            --force --deep --timestamp \
+            --options runtime \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            --keychain "$APPLE_CODESIGN_KEYCHAIN" \
+            "$app_path"
+
           echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
           echo "OUTPUT_ROOT=$output_root" >> "$GITHUB_ENV"
 
