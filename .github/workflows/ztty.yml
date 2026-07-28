@@ -387,13 +387,50 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/release-notes.md"
-          : > "$notes"
+          source_root="${RUNNER_TEMP}/ztty-source"
+          extractor="${RUNNER_TEMP}/extract-changelog.py"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$source_root"
+          git init "$source_root"
+          git -C "$source_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$source_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$source_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+          cat > "$extractor" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+changelog = Path(sys.argv[1])
+version = sys.argv[2]
+notes = Path(sys.argv[3])
+if not changelog.exists():
+    raise SystemExit(f"CHANGELOG.md not found in source commit for {version}")
+
+text = changelog.read_text()
+pattern = re.compile(
+    rf"(?ms)^##\s+v?{re.escape(version)}\s*\n(?P<body>.*?)(?=^##\s+v?\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?\s*$|\Z)"
+)
+match = pattern.search(text)
+if not match:
+    raise SystemExit(f"CHANGELOG.md has no entry for {version}")
+body = re.sub(r"<!--.*?-->", "", match.group("body"), flags=re.S).strip()
+if not body:
+    raise SystemExit(f"CHANGELOG.md entry for {version} is empty")
+notes.write_text(body + "\n")
+PY
+          python3 "$extractor" "$source_root/CHANGELOG.md" "$RELEASE_VERSION" "$notes"
 
           gh api "repos/${RELEASE_REPO}" >/dev/null
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
