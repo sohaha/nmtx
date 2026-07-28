@@ -93,7 +93,7 @@ jobs:
         shell: bash
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          ZTTY_RELEASE_WRITE_TOKEN: ${{ secrets.ZTTY_RELEASE_WRITE_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
@@ -104,7 +104,7 @@ jobs:
           missing=()
           for name in \
             CNB_TOKEN \
-            ZTTY_RELEASE_WRITE_TOKEN \
+            CODEBAY_RELEASE_WRITE_TOKEN \
             APPLE_CERTIFICATE_P12 \
             APPLE_CERTIFICATE_PASSWORD \
             APPLE_NOTARIZATION_KEY_P8 \
@@ -373,7 +373,7 @@ jobs:
       - name: Create or update GitHub release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ZTTY_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
