@@ -248,6 +248,7 @@ jobs:
             -archivePath "$archive_path" \
             -skipPackagePluginValidation \
             CODE_SIGN_IDENTITY="$APPLE_CODESIGN_IDENTITY" \
+            DEVELOPMENT_TEAM="GJE9R5VE87" \
             OTHER_CODE_SIGN_FLAGS="--keychain $APPLE_CODESIGN_KEYCHAIN" \
             archive
           xcodebuild \
