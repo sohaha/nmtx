@@ -251,11 +251,12 @@ jobs:
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO \
             archive
-          xcodebuild \
-            -exportArchive \
-            -archivePath "$archive_path" \
-            -exportOptionsPlist "$build_root/scripts/ExportOptions.plist" \
-            -exportPath "$export_path"
+          # Skip xcodebuild -exportArchive entirely: even with manual style
+          # Xcode 26 validates signing identities and fails on CI runners
+          # where the certificate lives in a custom keychain. Instead, copy
+          # the .app directly from the unsigned archive.
+          mkdir -p "$export_path"
+          ditto "$archive_path/Products/Applications/Ztty.app" "$export_path/Ztty.app"
 
           app_path="$export_path/Ztty.app"
           [[ -d "$app_path" ]] || {
