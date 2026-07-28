@@ -393,11 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/release-notes.md"
-          {
-            echo "Automated Ztty ${RELEASE_VERSION} release."
-            echo
-            echo "Source: [zls_nmtx/sohaha/ztty@${SOURCE_SHA}](https://cnb.cool/zls_nmtx/sohaha/ztty/-/commit/${SOURCE_SHA})"
-          } > "$notes"
+          : > "$notes"
 
           gh api "repos/${RELEASE_REPO}" >/dev/null
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
