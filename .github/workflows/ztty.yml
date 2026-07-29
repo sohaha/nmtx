@@ -187,6 +187,16 @@ jobs:
           git -C "$build_root" submodule update --init --recursive --depth=1
           [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
 
+      - name: Install Rust targets for Alacritty bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ztty's Alacritty bridge is a Rust crate built as a universal
+          # static library. The macOS runner ships a Rust toolchain but not
+          # the x86_64 target, so install both slices up front — outside the
+          # Xcode script sandbox that forbids writes to ~/.rustup.
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - name: Verify source version
         shell: bash
         run: |
