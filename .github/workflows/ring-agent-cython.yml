@@ -1,0 +1,315 @@
+name: Build Ring Agent Cython Release
+
+on:
+  repository_dispatch:
+    types: [build-ring-agent-cython-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: master
+        description: Branch, tag, or exact SHA from the private ring-agent source repo.
+      publish:
+        description: Actually upload the encrypted/cython release channel to Cloudflare R2.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      publish: ${{ steps.payload.outputs.publish }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "source_ref=${{ github.event.client_payload.source_ref }}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ github.event.client_payload.publish || 'false' }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
+            echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate payload
+        shell: bash
+        env:
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+          PUBLISH: ${{ steps.payload.outputs.publish }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_REF" ]] || { echo 'missing source_ref' >&2; exit 1; }
+          [[ "$SOURCE_REF" =~ ^[0-9A-Za-z._/-]+$ ]] || { echo 'invalid source_ref' >&2; exit 1; }
+          [[ "$PUBLISH" =~ ^(true|false)$ ]] || { echo 'invalid publish flag' >&2; exit 1; }
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ secrets.RING_AGENT_SOURCE_REPO }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+          SOURCE_TOKEN: ${{ secrets.RING_AGENT_SOURCE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_REPO" ]] || { echo 'missing RING_AGENT_SOURCE_REPO secret' >&2; exit 1; }
+          [[ -n "$SOURCE_TOKEN" ]] || { echo 'missing RING_AGENT_SOURCE_READ_TOKEN secret' >&2; exit 1; }
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            source_sha="$SOURCE_REF"
+          else
+            source_url="https://github.com/${SOURCE_REPO}.git"
+            basic_auth_token="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\n')"
+            source_sha="$({
+              git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" \
+                ls-remote "$source_url" "refs/heads/$SOURCE_REF" "refs/tags/$SOURCE_REF" "$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            })"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Unable to resolve source ref '$SOURCE_REF'" >&2
+            exit 1
+          }
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  validate_secrets:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required secrets and variables
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ secrets.RING_AGENT_SOURCE_REPO }}
+          SOURCE_TOKEN: ${{ secrets.RING_AGENT_SOURCE_READ_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in SOURCE_REPO SOURCE_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Missing workflow configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+
+  build_encrypted_wheels:
+    needs: [resolve, validate_secrets]
+    name: Encrypted wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel, macos-14, windows-latest]
+        include:
+          - os: macos-15-intel
+            macos_target: "10.12"
+          - os: macos-14
+            macos_target: "11.0"
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v5
+
+      - name: Fetch source at exact SHA
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ secrets.RING_AGENT_SOURCE_REPO }}
+          SOURCE_TOKEN: ${{ secrets.RING_AGENT_SOURCE_READ_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          remote_url="https://github.com/${SOURCE_REPO}.git"
+
+          rm -rf "$build_root"
+          mkdir -p "$build_root"
+          cd "$build_root"
+          git init
+          git remote add origin "$remote_url"
+          basic_auth_token="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\n')"
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" fetch --depth=1 origin "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          rm -rf .git
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cibuildwheel
+        shell: bash
+        run: python -m pip install 'cibuildwheel==2.22.0'
+
+      - name: Build encrypted wheels
+        shell: bash
+        working-directory: build-src/ring-kernel
+        env:
+          RING_REQUIRE_RUST_BUILD: "1"
+          RING_CYTHONIZE: "1"
+          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_* pp*"
+          CIBW_ARCHS_MACOS: auto
+          CIBW_ARCHS_LINUX: auto64 aarch64
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install Cython>=3.0
+          CIBW_BEFORE_BUILD_LINUX: >-
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal &&
+            python -m pip install Cython>=3.0
+          CIBW_ENVIRONMENT_MACOS: >-
+            MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}
+            RING_REQUIRE_RUST_BUILD=1
+            RING_CYTHONIZE=1
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH="$HOME/.cargo/bin:$PATH"
+            RING_REQUIRE_RUST_BUILD=1
+            RING_CYTHONIZE=1
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            RING_REQUIRE_RUST_BUILD=1
+            RING_CYTHONIZE=1
+        run: python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Verify built wheels carry runnable sidecar and import ring
+        shell: bash
+        working-directory: build-src/ring-kernel
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(./wheelhouse/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "no wheels produced in ./wheelhouse" >&2
+            exit 1
+          fi
+          for w in "${wheels[@]}"; do
+            python tests/test_wheel_sidecar_smoke.py --auto "$w"
+          done
+          python - "${wheels[@]}" <<'PY'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          from tests.test_wheel_sidecar_smoke import wheel_runnable_here
+
+          wheels = [Path(w) for w in sys.argv[1:]]
+          runnable = [w for w in wheels if wheel_runnable_here(w)]
+          if not runnable:
+              sys.exit('no produced wheel was runnable on this runner; import proof did not execute')
+          wheel = runnable[0]
+          with tempfile.TemporaryDirectory() as td:
+              venv = Path(td) / 'venv'
+              subprocess.run([sys.executable, '-m', 'venv', str(venv)], check=True)
+              bindir = 'Scripts' if sys.platform == 'win32' else 'bin'
+              py = venv / bindir / ('python.exe' if sys.platform == 'win32' else 'python')
+              subprocess.run([str(py), '-m', 'pip', 'install', '--no-deps', str(wheel)], check=True)
+              subprocess.run([str(py), '-c', 'import ring, sys; print(ring.__file__)'], check=True, cwd=td)
+          PY
+
+      - name: Upload encrypted wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-wheels-${{ matrix.os }}
+          path: build-src/ring-kernel/wheelhouse/*.whl
+          retention-days: 1
+          if-no-files-found: error
+
+  publish_cython:
+    name: Publish encrypted channel to Cloudflare R2
+    needs: [resolve, build_encrypted_wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      R2_BUCKET: releases
+      R2_PREFIX: ring-cython
+
+    steps:
+      - name: Checkout nmtx
+        uses: actions/checkout@v5
+
+      - name: Download encrypted wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: encrypted-wheels-*
+          merge-multiple: true
+          path: release-assets/core
+
+      - name: Determine publish mode
+        id: publish_mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            publish='${{ github.event.client_payload.publish || 'false' }}'
+          else
+            publish='${{ needs.resolve.outputs.publish }}'
+          fi
+          if [[ "$publish" == 'true' ]]; then
+            echo 'dry_run=0' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dry_run=1' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch source at exact SHA
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ secrets.RING_AGENT_SOURCE_REPO }}
+          SOURCE_TOKEN: ${{ secrets.RING_AGENT_SOURCE_READ_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          remote_url="https://github.com/${SOURCE_REPO}.git"
+
+          rm -rf "$build_root"
+          mkdir -p "$build_root"
+          cd "$build_root"
+          git init
+          git remote add origin "$remote_url"
+          basic_auth_token="$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 | tr -d '\n')"
+          git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" fetch --depth=1 origin "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          rm -rf .git
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: build-src/ring/tui-next/go.mod
+
+      - name: Set up Node.js for Wrangler
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wrangler CLI
+        shell: bash
+        run: npm install --global wrangler
+
+      - name: Publish encrypted release channel
+        shell: bash
+        working-directory: build-src
+        env:
+          CORE_ASSETS_DIR: ${{ github.workspace }}/release-assets/core
+          RING_CYTHONIZE: '1'
+          R2_DRY_RUN: ${{ steps.publish_mode.outputs.dry_run }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          bash scripts/mise/publish-cf.sh
