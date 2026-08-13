@@ -114,8 +114,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15-intel, macos-14, windows-latest]
+        # Ubuntu is split by architecture: x86_64 on a standard x64 runner,
+        # aarch64 on a native ARM64 runner (no QEMU emulation), so neither
+        # Linux leg blows the job timeout the way the combined QEMU matrix did.
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15-intel
+          - macos-14
+          - windows-latest
         include:
+          - os: ubuntu-24.04
+            linux_archs: x86_64
+          - os: ubuntu-24.04-arm
+            linux_archs: aarch64
           - os: macos-15-intel
             macos_target: "10.12"
           - os: macos-14
@@ -167,7 +179,7 @@ jobs:
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_* pp*"
           CIBW_ARCHS_MACOS: auto
-          CIBW_ARCHS_LINUX: auto64 aarch64
+          CIBW_ARCHS_LINUX: ${{ matrix.linux_archs }}
           CIBW_ARCHS_WINDOWS: AMD64
           CIBW_BEFORE_BUILD: >-
             python -m pip install Cython>=3.0
