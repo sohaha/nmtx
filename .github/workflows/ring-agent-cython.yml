@@ -1,8 +1,8 @@
-name: Build Ring Agent Cython Release
+name: Build Ring Agent Release
 
 on:
   repository_dispatch:
-    types: [build-ring-agent-cython-release]
+    types: [build-ring-agent-release]
   workflow_dispatch:
     inputs:
       source_ref:
@@ -10,8 +10,15 @@ on:
         type: string
         default: master
         description: Branch, tag, or exact SHA from the private ring-agent source repo.
+      channel:
+        description: Release channel to build. cython = encrypted Cython wheels (ring-cython/), base = plain wheels (ring-base/).
+        type: choice
+        options:
+          - cython
+          - base
+        default: cython
       publish:
-        description: Actually upload the encrypted/cython release channel to Cloudflare R2.
+        description: Actually upload the selected release channel to Cloudflare R2.
         type: boolean
         default: false
 
@@ -27,6 +34,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       publish: ${{ steps.payload.outputs.publish }}
+      channel: ${{ steps.payload.outputs.channel }}
     steps:
       - name: Resolve payload
         id: payload
@@ -35,9 +43,11 @@ jobs:
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             echo "source_ref=${{ github.event.client_payload.source_ref }}" >> "$GITHUB_OUTPUT"
             echo "publish=${{ github.event.client_payload.publish || 'false' }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ github.event.client_payload.channel || 'cython' }}" >> "$GITHUB_OUTPUT"
           else
             echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate payload
@@ -45,11 +55,13 @@ jobs:
         env:
           SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
           PUBLISH: ${{ steps.payload.outputs.publish }}
+          CHANNEL: ${{ steps.payload.outputs.channel }}
         run: |
           set -euo pipefail
           [[ -n "$SOURCE_REF" ]] || { echo 'missing source_ref' >&2; exit 1; }
           [[ "$SOURCE_REF" =~ ^[0-9A-Za-z._/-]+$ ]] || { echo 'invalid source_ref' >&2; exit 1; }
           [[ "$PUBLISH" =~ ^(true|false)$ ]] || { echo 'invalid publish flag' >&2; exit 1; }
+          [[ "$CHANNEL" =~ ^(cython|base)$ ]] || { echo 'invalid channel' >&2; exit 1; }
 
       - name: Resolve source SHA
         id: source
@@ -106,9 +118,9 @@ jobs:
             exit 1
           fi
 
-  build_encrypted_wheels:
+  build_wheels:
     needs: [resolve, validate_secrets]
-    name: Encrypted wheels on ${{ matrix.os }}
+    name: Wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
     strategy:
@@ -170,12 +182,12 @@ jobs:
         shell: bash
         run: python -m pip install 'cibuildwheel==2.22.0'
 
-      - name: Build encrypted wheels
+      - name: Build wheels
         shell: bash
         working-directory: build-src/ring-kernel
         env:
           RING_REQUIRE_RUST_BUILD: "1"
-          RING_CYTHONIZE: "1"
+          RING_CYTHONIZE: ${{ needs.resolve.outputs.channel == 'cython' && '1' || '0' }}
           CIBW_BUILD: "cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_* pp*"
           CIBW_ARCHS_MACOS: auto
@@ -189,15 +201,25 @@ jobs:
           CIBW_ENVIRONMENT_MACOS: >-
             MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}
             RING_REQUIRE_RUST_BUILD=1
-            RING_CYTHONIZE=1
+            RING_CYTHONIZE=${{ needs.resolve.outputs.channel == 'cython' && '1' || '0' }}
           CIBW_ENVIRONMENT_LINUX: >-
             PATH="$HOME/.cargo/bin:$PATH"
             RING_REQUIRE_RUST_BUILD=1
-            RING_CYTHONIZE=1
+            RING_CYTHONIZE=${{ needs.resolve.outputs.channel == 'cython' && '1' || '0' }}
           CIBW_ENVIRONMENT_WINDOWS: >-
             RING_REQUIRE_RUST_BUILD=1
-            RING_CYTHONIZE=1
+            RING_CYTHONIZE=${{ needs.resolve.outputs.channel == 'cython' && '1' || '0' }}
         run: python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Build sdist (base channel only)
+        if: needs.resolve.outputs.channel == 'base' && matrix.os == 'ubuntu-24.04'
+        shell: bash
+        working-directory: build-src/ring-kernel
+        run: |
+          set -euo pipefail
+          python -m pip install -q setuptools wheel build
+          RING_SKIP_RUST_BUILD=1 RING_STRIP_SOURCE=1 python -m build --sdist --outdir wheelhouse
+          ls -la wheelhouse/*.tar.gz
 
       - name: Verify built wheels carry runnable sidecar and import ring
         shell: bash
@@ -234,31 +256,31 @@ jobs:
               subprocess.run([str(py), '-c', 'import ring, sys; print(ring.__file__)'], check=True, cwd=td)
           PY
 
-      - name: Upload encrypted wheel artifacts
+      - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: encrypted-wheels-${{ matrix.os }}
-          path: build-src/ring-kernel/wheelhouse/*.whl
+          name: wheels-${{ matrix.os }}
+          path: build-src/ring-kernel/wheelhouse/*
           retention-days: 1
           if-no-files-found: error
 
-  publish_cython:
-    name: Publish encrypted channel to Cloudflare R2
-    needs: [resolve, build_encrypted_wheels]
+  publish:
+    name: Publish release channel to Cloudflare R2
+    needs: [resolve, build_wheels]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       R2_BUCKET: releases
-      R2_PREFIX: ring-cython
+      R2_PREFIX: ${{ needs.resolve.outputs.channel == 'cython' && 'ring-cython' || 'ring-base' }}
 
     steps:
       - name: Checkout nmtx
         uses: actions/checkout@v5
 
-      - name: Download encrypted wheel artifacts
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: encrypted-wheels-*
+          pattern: wheels-*
           merge-multiple: true
           path: release-assets/core
 
@@ -313,12 +335,12 @@ jobs:
         shell: bash
         run: npm install --global wrangler
 
-      - name: Publish encrypted release channel
+      - name: Publish release channel
         shell: bash
         working-directory: build-src
         env:
           CORE_ASSETS_DIR: ${{ github.workspace }}/release-assets/core
-          RING_CYTHONIZE: '1'
+          RING_CYTHONIZE: ${{ needs.resolve.outputs.channel == 'cython' && '1' || '0' }}
           R2_DRY_RUN: ${{ steps.publish_mode.outputs.dry_run }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
