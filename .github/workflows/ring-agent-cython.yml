@@ -11,7 +11,7 @@ on:
         default: master
         description: Branch, tag, or exact SHA from the private ring-agent source repo.
       channel:
-        description: Release channel to build. cython = encrypted Cython wheels (ring-cython/), base = plain wheels (ring-base/).
+        description: Release channel to build. cython = encrypted Cython wheels (ring/), base = plain wheels (ring-nmtx/, internal only).
         type: choice
         options:
           - cython
@@ -271,7 +271,7 @@ jobs:
     timeout-minutes: 45
     env:
       R2_BUCKET: releases
-      R2_PREFIX: ${{ needs.resolve.outputs.channel == 'cython' && 'ring-cython' || 'ring-base' }}
+      R2_PREFIX: ${{ needs.resolve.outputs.channel == 'cython' && 'ring' || 'ring-nmtx' }}
 
     steps:
       - name: Checkout nmtx
