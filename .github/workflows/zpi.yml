@@ -39,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_fetch_ref: ${{ steps.payload.outputs.source_fetch_ref }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.payload.outputs.version }}
       release_tag: ${{ steps.payload.outputs.release_tag }}
@@ -87,8 +88,14 @@ jobs:
             exit 1
           }
 
+          source_fetch_ref="$source_ref"
+          if [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            source_fetch_ref="$release_tag"
+          fi
+
           {
             echo "source_ref=$source_ref"
+            echo "source_fetch_ref=$source_fetch_ref"
             echo "version=$version"
             echo "release_tag=$release_tag"
           } >> "$GITHUB_OUTPUT"
@@ -161,6 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      SOURCE_FETCH_REF: ${{ needs.resolve.outputs.source_fetch_ref }}
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
