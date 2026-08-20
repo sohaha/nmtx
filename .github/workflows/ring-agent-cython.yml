@@ -21,6 +21,14 @@ on:
         description: Actually upload the selected release channel to Cloudflare R2.
         type: boolean
         default: false
+      expected_tui_version:
+        description: Optional. Fail the build if the fetched source ring/tui-next/VERSION differs.
+        type: string
+        default: ""
+      expected_kernel_version:
+        description: Optional. Fail the build if the fetched source ring-kernel/pyproject.toml version differs.
+        type: string
+        default: 
 
 permissions:
   contents: read
@@ -35,6 +43,8 @@ jobs:
       source_sha: ${{ steps.source.outputs.source_sha }}
       publish: ${{ steps.payload.outputs.publish }}
       channel: ${{ steps.payload.outputs.channel }}
+      expected_tui_version: ${{ steps.payload.outputs.expected_tui_version }}
+      expected_kernel_version: ${{ steps.payload.outputs.expected_kernel_version }}
     steps:
       - name: Resolve payload
         id: payload
@@ -44,10 +54,14 @@ jobs:
             echo "source_ref=${{ github.event.client_payload.source_ref }}" >> "$GITHUB_OUTPUT"
             echo "publish=${{ github.event.client_payload.publish || 'false' }}" >> "$GITHUB_OUTPUT"
             echo "channel=${{ github.event.client_payload.channel || 'cython' }}" >> "$GITHUB_OUTPUT"
+            echo "expected_tui_version=${{ github.event.client_payload.expected_tui_version || '' }}" >> "$GITHUB_OUTPUT"
+            echo "expected_kernel_version=${{ github.event.client_payload.expected_kernel_version || '' }}" >> "$GITHUB_OUTPUT"
           else
             echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
             echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "expected_tui_version=${{ inputs.expected_tui_version }}" >> "$GITHUB_OUTPUT"
+            echo "expected_kernel_version=${{ inputs.expected_kernel_version }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate payload
@@ -169,6 +183,28 @@ jobs:
           git -c credential.helper= -c core.askPass= -c http.extraheader="AUTHORIZATION: basic ${basic_auth_token}" fetch --depth=1 origin "$SOURCE_SHA"
           git checkout --force FETCH_HEAD
           rm -rf .git
+
+      - name: Verify fetched source matches expected versions
+        if: needs.resolve.outputs.expected_tui_version != '' || needs.resolve.outputs.expected_kernel_version != ''
+        shell: bash
+        env:
+          BUILD_ROOT: ${{ github.workspace }}/build-src
+          EXPECTED_TUI: ${{ needs.resolve.outputs.expected_tui_version }}
+          EXPECTED_KERNEL: ${{ needs.resolve.outputs.expected_kernel_version }}
+        run: |
+          set -euo pipefail
+          cd "$BUILD_ROOT"
+          actual_tui="$(tr -d '[:space:]' < ring/tui-next/VERSION)"
+          actual_kernel="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"/\1/p' ring-kernel/pyproject.toml | head -1)"
+          [[ -z "$EXPECTED_TUI" || "$actual_tui" == "$EXPECTED_TUI" ]] || {
+            echo "::error::TUI version mismatch: expected $EXPECTED_TUI, fetched source has $actual_tui (stale mirror?)"
+            exit 1
+          }
+          [[ -z "$EXPECTED_KERNEL" || "$actual_kernel" == "$EXPECTED_KERNEL" ]] || {
+            echo "::error::kernel version mismatch: expected $EXPECTED_KERNEL, fetched source has $actual_kernel (stale mirror?)"
+            exit 1
+          }
+          echo "Verified fetched source: TUI ${actual_tui}, kernel ${actual_kernel}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
