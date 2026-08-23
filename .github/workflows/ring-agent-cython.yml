@@ -28,7 +28,7 @@ on:
       expected_kernel_version:
         description: Optional. Fail the build if the fetched source ring-kernel/pyproject.toml version differs.
         type: string
-        default: 
+        default: ""
 
 permissions:
   contents: read
@@ -49,19 +49,43 @@ jobs:
       - name: Resolve payload
         id: payload
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_PUBLISH: ${{ github.event.client_payload.publish || 'false' }}
+          DISPATCH_CHANNEL: ${{ github.event.client_payload.channel || 'cython' }}
+          DISPATCH_EXPECTED_TUI_VERSION: ${{ github.event.client_payload.expected_tui_version || '' }}
+          DISPATCH_EXPECTED_KERNEL_VERSION: ${{ github.event.client_payload.expected_kernel_version || '' }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_EXPECTED_TUI_VERSION: ${{ inputs.expected_tui_version }}
+          INPUT_EXPECTED_KERNEL_VERSION: ${{ inputs.expected_kernel_version }}
         run: |
-          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            echo "source_ref=${{ github.event.client_payload.source_ref }}" >> "$GITHUB_OUTPUT"
-            echo "publish=${{ github.event.client_payload.publish || 'false' }}" >> "$GITHUB_OUTPUT"
-            echo "channel=${{ github.event.client_payload.channel || 'cython' }}" >> "$GITHUB_OUTPUT"
-            echo "expected_tui_version=${{ github.event.client_payload.expected_tui_version || '' }}" >> "$GITHUB_OUTPUT"
-            echo "expected_kernel_version=${{ github.event.client_payload.expected_kernel_version || '' }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          write_output() {
+            name="$1"
+            value="$2"
+            delimiter="ztty_$(openssl rand -hex 16)"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            write_output source_ref "$DISPATCH_SOURCE_REF"
+            write_output publish "$DISPATCH_PUBLISH"
+            write_output channel "$DISPATCH_CHANNEL"
+            write_output expected_tui_version "$DISPATCH_EXPECTED_TUI_VERSION"
+            write_output expected_kernel_version "$DISPATCH_EXPECTED_KERNEL_VERSION"
           else
-            echo "source_ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
-            echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
-            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
-            echo "expected_tui_version=${{ inputs.expected_tui_version }}" >> "$GITHUB_OUTPUT"
-            echo "expected_kernel_version=${{ inputs.expected_kernel_version }}" >> "$GITHUB_OUTPUT"
+            write_output source_ref "$INPUT_SOURCE_REF"
+            write_output publish "$INPUT_PUBLISH"
+            write_output channel "$INPUT_CHANNEL"
+            write_output expected_tui_version "$INPUT_EXPECTED_TUI_VERSION"
+            write_output expected_kernel_version "$INPUT_EXPECTED_KERNEL_VERSION"
           fi
 
       - name: Validate payload
