@@ -388,7 +388,7 @@ jobs:
           set -euo pipefail
           count=$(find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -name '*.zip' | wc -l)
           echo "Found $count release artifacts"
-          test "$count" -ge 2
+          test "$count" -eq 4
           find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Prepare R2 payload
