@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-// macOS targets only; Windows needs windows-rs compat fix upstream
 const EXPECTED_TARGETS = new Set([
   'aarch64-apple-darwin',
   'x86_64-apple-darwin',
+  'aarch64-pc-windows-msvc',
+  'x86_64-pc-windows-msvc',
 ])
 
 function usage() {
