@@ -361,8 +361,80 @@ jobs:
           remove_apple_signing_keychain "${APPLE_CODESIGN_KEYCHAIN:-}"
           rm -f "${RUNNER_TEMP}/apple_signing_certificate.p12"
 
+  build-linux:
+    needs: resolve
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch ZKey source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Install required Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Install Rust targets
+        run: |
+          rustup target add --toolchain 1.98 ${{ matrix.target }}
+          rustup target list --installed
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/build-src/Cargo.toml" | head -n 1)"
+          [[ "$version" == "$RELEASE_VERSION" ]] || {
+            echo "workflow version $RELEASE_VERSION does not match Cargo.toml version $version"
+            exit 1
+          }
+
+      - name: Sync package version in Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          cargo update --package zkey --precise "$RELEASE_VERSION"
+
+      - name: Package Linux ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash packaging/linux/package.sh "${{ matrix.target }}"
+
+      - name: Upload Linux ${{ matrix.target }} package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x64' || 'arm64' }}
+          path: build-src/dist/${{ matrix.target }}/*.zip
+          if-no-files-found: error
+
+
   publish:
-    needs: [resolve, build-macos]
+    needs: [resolve, build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout nmtx helpers
@@ -388,7 +460,7 @@ jobs:
           set -euo pipefail
           count=$(find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -name '*.zip' | wc -l)
           echo "Found $count release artifacts"
-          test "$count" -eq 4
+          test "$count" -eq 6
           find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Prepare R2 payload
