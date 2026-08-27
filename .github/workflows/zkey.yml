@@ -362,7 +362,7 @@ jobs:
           rm -f "${RUNNER_TEMP}/apple_signing_certificate.p12"
 
   publish:
-    needs: [resolve, build-windows, build-macos]
+    needs: [resolve, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout nmtx helpers
