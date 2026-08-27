@@ -365,7 +365,7 @@ jobs:
     needs: resolve
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        target: [x86_64-unknown-linux-gnu]
     runs-on: ubuntu-latest
     env:
       SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
@@ -379,9 +379,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libssl-dev pkg-config
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y -qq gcc-aarch64-linux-gnu libssl-dev:arm64
-          fi
 
       - name: Fetch ZKey source at exact SHA
         shell: bash
