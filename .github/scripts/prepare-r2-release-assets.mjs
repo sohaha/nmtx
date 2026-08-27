@@ -7,6 +7,7 @@ const EXPECTED_TARGETS = new Set([
   'x86_64-apple-darwin',
   'aarch64-pc-windows-msvc',
   'x86_64-pc-windows-msvc',
+  'aarch64-unknown-linux-gnu',
   'x86_64-unknown-linux-gnu',
 ])
 
