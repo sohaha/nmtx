@@ -192,7 +192,9 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal
 
       - name: Install Rust targets
-        run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          rustup target add aarch64-pc-windows-msvc
 
       - name: Verify source version
         shell: bash
@@ -267,7 +269,9 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal
 
       - name: Install Rust targets
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
 
       - name: Verify source version
         shell: bash
