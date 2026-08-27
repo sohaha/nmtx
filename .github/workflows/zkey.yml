@@ -193,8 +193,9 @@ jobs:
 
       - name: Install Rust targets
         run: |
-          rustup target add x86_64-pc-windows-msvc
-          rustup target add aarch64-pc-windows-msvc
+          rustup target add --toolchain 1.98 x86_64-pc-windows-msvc
+          rustup target add --toolchain 1.98 aarch64-pc-windows-msvc
+          rustup target list --installed
 
       - name: Verify source version
         shell: bash
@@ -270,8 +271,9 @@ jobs:
 
       - name: Install Rust targets
         run: |
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
+          rustup target add --toolchain 1.98 aarch64-apple-darwin
+          rustup target add --toolchain 1.98 x86_64-apple-darwin
+          rustup target list --installed
 
       - name: Verify source version
         shell: bash
