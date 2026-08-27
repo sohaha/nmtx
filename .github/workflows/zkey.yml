@@ -1,0 +1,451 @@
+name: Build ZKey Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  repository_dispatch:
+    types: [build-zkey-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: main
+        description: ZKey branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.0.1 or 0.0.1-beta.1.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/zkey
+  RELEASE_PUBLIC_BASE_URL: https://releases.73zls.com/zkey
+  R2_BUCKET: releases
+  R2_PREFIX: zkey
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+          PUSH_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-main}"
+            version="${DISPATCH_VERSION:-}"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            [[ "$PUSH_REF_TYPE" == "tag" ]] || {
+              echo "unsupported push ref type: $PUSH_REF_TYPE"
+              exit 1
+            }
+            source_ref="$PUSH_REF_NAME"
+            version="${PUSH_REF_NAME#v}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+          fi
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zkey/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$source_ref" =~ ^v?[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported resolved source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_TEAM_ID \
+            APPLE_APP_PASSWORD \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$({
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF"
+            } | awk 'NR == 1 { print $1 }')"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve ZKey source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: resolve
+    runs-on: windows-2025
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch ZKey source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Install required Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Install Rust targets
+        run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/build-src/Cargo.toml" | head -n 1)"
+          [[ "$version" == "$RELEASE_VERSION" ]] || {
+            echo "workflow version $RELEASE_VERSION does not match Cargo.toml version $version"
+            exit 1
+          }
+
+      - name: Sync package version in Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          cargo update --package zkey --precise "$RELEASE_VERSION"
+
+      - name: Package Windows x64
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\build-src\packaging\windows\package.ps1" -Target x86_64-pc-windows-msvc
+
+      - name: Package Windows ARM64
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\build-src\packaging\windows\package.ps1" -Target aarch64-pc-windows-msvc -SkipConfigCheck
+
+      - name: Upload Windows x64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: build-src/dist/x86_64-pc-windows-msvc/*.zip
+          if-no-files-found: error
+
+      - name: Upload Windows ARM64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-arm64
+          path: build-src/dist/aarch64-pc-windows-msvc/*.zip
+          if-no-files-found: error
+
+  build-macos:
+    needs: resolve
+    runs-on: macos-14
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch ZKey source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Install required Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/build-src/Cargo.toml" | head -n 1)"
+          [[ "$version" == "$RELEASE_VERSION" ]] || {
+            echo "workflow version $RELEASE_VERSION does not match Cargo.toml version $version"
+            exit 1
+          }
+
+      - name: Sync package version in Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          cargo update --package zkey --precise "$RELEASE_VERSION"
+
+      - name: Configure Apple code signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/actions/macos-code-sign/signing_helpers.sh"
+
+          cert_path="${RUNNER_TEMP}/apple_signing_certificate.p12"
+          keychain_path="${RUNNER_TEMP}/zkey-signing.keychain-db"
+          configure_apple_code_signing \
+            "$APPLE_CERTIFICATE_P12" \
+            "$APPLE_CERTIFICATE_PASSWORD" \
+            "$cert_path" \
+            "$keychain_path" \
+            actions
+
+          {
+            echo "ZKEY_CODESIGN_IDENTITY=$APPLE_CODESIGN_IDENTITY"
+            echo "APPLE_CODESIGN_KEYCHAIN=$APPLE_CODESIGN_KEYCHAIN"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::$APPLE_CODESIGN_IDENTITY"
+
+      - name: Package macOS Apple Silicon
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash packaging/macos/package.sh aarch64-apple-darwin
+
+      - name: Package macOS Intel
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash packaging/macos/package.sh x86_64-apple-darwin
+
+      - name: Upload macOS Apple Silicon package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: build-src/dist/aarch64-apple-darwin/*.zip
+          if-no-files-found: error
+
+      - name: Upload macOS Intel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-x64
+          path: build-src/dist/x86_64-apple-darwin/*.zip
+          if-no-files-found: error
+
+      - name: Remove signing keychain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/actions/macos-code-sign/signing_helpers.sh"
+          remove_apple_signing_keychain "${APPLE_CODESIGN_KEYCHAIN:-}"
+          rm -f "${RUNNER_TEMP}/apple_signing_certificate.p12"
+
+  publish:
+    needs: [resolve, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -name '*.zip' | wc -l)" -eq 4
+          find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Prepare R2 payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-r2-release-assets.mjs \
+            "${RUNNER_TEMP}/release-assets" \
+            "${RUNNER_TEMP}/release-publish" \
+            "$VERSION" \
+            "$RELEASE_PUBLIC_BASE_URL"
+          cat "${RUNNER_TEMP}/release-publish/latest.json"
+
+      - name: Upload latest release to R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/release-publish"
+          current_manifest_url="$RELEASE_PUBLIC_BASE_URL/latest.json"
+          previous_manifest="${RUNNER_TEMP}/previous-latest.json"
+
+          if curl --fail --silent --show-error --location "$current_manifest_url" > "$previous_manifest"; then
+            echo "Loaded previous manifest from $current_manifest_url"
+          else
+            rm -f "$previous_manifest"
+            echo "No previous manifest found; publishing fresh prefix"
+          fi
+
+          content_type() {
+            case "$1" in
+              *.json) printf 'application/json' ;;
+              *.zip) printf 'application/zip' ;;
+              *) printf 'application/octet-stream' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
+          for file in "$release_dir"/*; do
+            [[ -f "$file" ]] || continue
+            key="$(basename "$file")"
+            ct="$(content_type "$file")"
+            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" >/dev/null
+          done
+
+          if [[ -f "$previous_manifest" ]]; then
+            mapfile -t old_assets < <(jq -r '.assets[]?.name // empty' "$previous_manifest")
+            mapfile -t new_assets < <(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            for asset in "${old_assets[@]}"; do
+              keep=0
+              for current in "${new_assets[@]}"; do
+                if [[ "$asset" == "$current" ]]; then
+                  keep=1
+                  break
+                fi
+              done
+              if [[ "$keep" -eq 0 ]]; then
+                printf '  delete %s/%s\n' "$R2_PREFIX" "$asset"
+                wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$asset" --remote >/dev/null 2>&1 || true
+              fi
+            done
+          fi
