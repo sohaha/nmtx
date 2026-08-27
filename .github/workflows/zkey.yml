@@ -382,8 +382,11 @@ jobs:
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             sudo dpkg --add-architecture arm64
             # security.ubuntu.com 不提供 arm64 索引，改用 azure 镜像源
-            sudo sed -i -E 's|https?://security\.ubuntu\.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|g' \
-              /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            # 逐文件替换 security 源为 azure 镜像（避免因文件缺失导致整条 sed 失败）
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+              [ -f "$f" ] || continue
+              sudo sed -i -E 's|(URIs:[[:space:]]*https?://)security\.ubuntu\.com/ubuntu/|\1azure.archive.ubuntu.com/ubuntu/|g' "$f" 2>/dev/null || true
+            done
             sudo apt-get update -qq
             sudo apt-get install -y -qq gcc-aarch64-linux-gnu libssl-dev:arm64
           fi
