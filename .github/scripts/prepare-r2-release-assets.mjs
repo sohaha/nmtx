@@ -2,11 +2,10 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+// macOS targets only; Windows needs windows-rs compat fix upstream
 const EXPECTED_TARGETS = new Set([
   'aarch64-apple-darwin',
   'x86_64-apple-darwin',
-  'aarch64-pc-windows-msvc',
-  'x86_64-pc-windows-msvc',
 ])
 
 function usage() {
@@ -33,8 +32,8 @@ const releaseNotesUrl = `${publicBaseUrl}/#v${version}`
 const expectedPrefix = `ZKey-v${version}-`
 const zipFiles = collectZipFiles(artifactsDir)
 
-if (zipFiles.length !== EXPECTED_TARGETS.size) {
-  throw new Error(`expected ${EXPECTED_TARGETS.size} release ZIPs, found ${zipFiles.length}`)
+if (zipFiles.length < EXPECTED_TARGETS.size) {
+  throw new Error(`expected at least ${EXPECTED_TARGETS.size} release ZIPs, found ${zipFiles.length}`)
 }
 
 rmSync(outputDir, { force: true, recursive: true })
