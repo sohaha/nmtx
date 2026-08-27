@@ -381,6 +381,8 @@ jobs:
           sudo apt-get install -y -qq libssl-dev pkg-config
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             sudo dpkg --add-architecture arm64
+            # 限制现有源只服务 amd64（它们没有 arm64 索引，否则 apt 会 404）
+            sudo sed -i '/^Types: deb/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
             # arm64 二进制包由 ports.ubuntu.com 提供（archive/azure 只服务 amd64）
             sudo tee /etc/apt/sources.list.d/arm64-ports.sources > /dev/null <<'SOURCES'
           Types: deb
