@@ -185,7 +185,7 @@ jobs:
           for normalized_target in "${normalized[@]}"; do
             case "$normalized_target" in
               win-x64)
-                runner="windows-latest"
+                runner="windows-2022"
                 ;;
               linux-x64)
                 runner="ubuntu-24.04"
