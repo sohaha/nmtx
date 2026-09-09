@@ -327,6 +327,49 @@ jobs:
       - name: Install Wrangler CLI
         run: npm install --global wrangler
 
+      - name: Publish fd/rg vendor tools to R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKET: releases
+          R2_VENDOR_PREFIX: zpi/vendor/fd-rg
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          fd_version="10.4.2"
+          rg_version="15.2.0"
+          assets=(
+            "fd-v${fd_version}-aarch64-apple-darwin.tar.gz"
+            "ripgrep-${rg_version}-aarch64-apple-darwin.tar.gz"
+            "fd-v${fd_version}-aarch64-unknown-linux-gnu.tar.gz"
+            "ripgrep-${rg_version}-aarch64-unknown-linux-musl.tar.gz"
+            "fd-v${fd_version}-x86_64-unknown-linux-gnu.tar.gz"
+            "ripgrep-${rg_version}-x86_64-unknown-linux-musl.tar.gz"
+            "fd-v${fd_version}-aarch64-pc-windows-msvc.zip"
+            "ripgrep-${rg_version}-aarch64-pc-windows-msvc.zip"
+            "fd-v${fd_version}-x86_64-pc-windows-msvc.zip"
+            "ripgrep-${rg_version}-x86_64-pc-windows-msvc.zip"
+          )
+          for asset in "${assets[@]}"; do
+            if [[ "$asset" == fd-* ]]; then
+              url="https://github.com/sharkdp/fd/releases/download/v${fd_version}/${asset}"
+            else
+              url="https://github.com/BurntSushi/ripgrep/releases/download/${rg_version}/${asset}"
+            fi
+            echo "Downloading $asset"
+            curl -fsSL --retry 3 --connect-timeout 30 "$url" -o "$tmp_dir/$asset"
+            case "$asset" in
+              *.zip) content_type=application/zip ;;
+              *.tar.gz) content_type=application/gzip ;;
+            esac
+            wrangler r2 object put "$R2_BUCKET/$R2_VENDOR_PREFIX/$asset" \
+              --remote --file "$tmp_dir/$asset" --content-type "$content_type" >/dev/null
+          done
+          echo "fd/rg vendor tools published under $R2_VENDOR_PREFIX"
+
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
