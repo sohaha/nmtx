@@ -334,6 +334,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           R2_BUCKET: releases
           R2_VENDOR_PREFIX: zpi/vendor/fd-rg
+          R2_VENDOR_PUBLIC_BASE: https://releases.73zls.com/zpi/vendor/fd-rg
         run: |
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
@@ -353,6 +354,10 @@ jobs:
             "ripgrep-${rg_version}-x86_64-pc-windows-msvc.zip"
           )
           for asset in "${assets[@]}"; do
+            if curl -fsSIL --max-time 15 "$R2_VENDOR_PUBLIC_BASE/$asset" >/dev/null 2>&1; then
+              echo "Skipping existing R2 asset: $asset"
+              continue
+            fi
             if [[ "$asset" == fd-* ]]; then
               url="https://github.com/sharkdp/fd/releases/download/v${fd_version}/${asset}"
             else
