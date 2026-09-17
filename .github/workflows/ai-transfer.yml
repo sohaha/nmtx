@@ -1,0 +1,580 @@
+name: Build AiTransfer Release
+
+on:
+  repository_dispatch:
+    types: [build-ai-transfer-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: main
+        description: ai-transfer branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 2.1.0 or 2.1.0-beta.1.
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Create the GitHub release and upload the binaries to Cloudflare R2.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/ai-transfer
+  # GitHub 公共镜像，README 与应用内更新检查都指向这里，release 与 R2 双发。
+  GH_SOURCE_URL: https://github.com/sohaha/ai-transfer.git
+  RELEASE_REPO: sohaha/ai-transfer
+  PUBLIC_BASE_URL: https://releases.73zls.com/ai-transfer
+  R2_BUCKET: releases
+  R2_PREFIX: ai-transfer
+  NODE_VERSION: "24.18.0"
+  PNPM_VERSION: "11.17.0"
+  # 竖线分隔在任何错误（含网络错误）时回退到 direct；与源仓 release.yml 保持一致。
+  GOPROXY: https://proxy.golang.org|direct
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      publish: ${{ steps.payload.outputs.publish }}
+      prerelease: ${{ steps.payload.outputs.prerelease }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_PUBLISH: ${{ github.event.client_payload.publish }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-main}"
+            version="${DISPATCH_VERSION:-}"
+            publish="${DISPATCH_PUBLISH:-true}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+            publish="${INPUT_PUBLISH:-true}"
+          fi
+
+          # 支持完整的 CNB commit URL
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/ai-transfer/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+          [[ "$publish" == "true" || "$publish" == "false" ]] || {
+            echo "invalid publish flag: $publish"
+            exit 1
+          }
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CODEBAY_RELEASE_WRITE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            CODEBAY_RELEASE_WRITE_TOKEN \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$(
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve ai-transfer source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for GitHub mirror sync
+        # README 与 app 更新检查都从 GitHub Releases 下载/发现版本，release 会以
+        # source_sha 打 tag，因此提交必须先出现在 GitHub 公共镜像上。镜像同步是
+        # 异步的，这里最多等 10 分钟。
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="${{ steps.source.outputs.source_sha }}"
+          echo "Waiting for $GH_SOURCE_URL to expose $source_sha ..."
+          for ((i = 1; i <= 120; i++)); do
+            if git ls-remote "$GH_SOURCE_URL" refs/heads/main 2>/dev/null | grep -q "^$source_sha"; then
+              echo "GitHub mirror synced."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "error: GitHub mirror has not synced $source_sha after 10 minutes." >&2
+          echo "       Re-run after the CNB -> GitHub mirror catches up, or pass --publish false to skip publishing." >&2
+          exit 1
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch ai-transfer source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: build-src/web/pnpm-lock.yaml
+
+      - name: Validate and build embedded web assets
+        # 与源仓 .github/actions/web-ci 相同命令链（lint + format + build）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web run lint
+          pnpm --dir web run format
+          pnpm --dir web run build
+          test -f internal/webui/dist/index.html
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: build-src/go.mod
+          cache: true
+
+      - name: Cross-compile release binaries
+        # 与源仓 .github/workflows/release.yml 的平台矩阵及文件命名保持一致。
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          mkdir -p "$release_dir"
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+
+          targets=(
+            "linux amd64 ai-transfer-linux-amd64"
+            "linux arm64 ai-transfer-linux-arm64"
+            "darwin amd64 ai-transfer-macos-amd64"
+            "darwin arm64 ai-transfer-macos-arm64"
+            "windows amd64 ai-transfer-windows-amd64.exe"
+          )
+          for target in "${targets[@]}"; do
+            set -- $target
+            echo "building $3 ($1/$2)"
+            CGO_ENABLED=0 GOOS="$1" GOARCH="$2" go build -trimpath \
+              -ldflags "-s -w -X ai-transfer/internal/platform/version.Version=v${RELEASE_VERSION}" \
+              -o "$release_dir/$3" .
+          done
+
+      - name: Stage release metadata
+        # 与源仓 package-metadata job 相同的许可/声明文件集合（bom.cdx.json 不
+        # 重复计入 release-assets.txt 清单，仅随元数据上传）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          cp "$build_root/LICENSE" "$release_dir/LICENSE"
+          cp "$build_root/THIRD_PARTY_NOTICES.md" "$release_dir/THIRD_PARTY_NOTICES.md"
+          cp "$build_root/LICENSES/Apache-2.0.txt" "$release_dir/Apache-2.0.txt"
+          cp "$build_root/LICENSES/Inno-Setup.txt" "$release_dir/Inno-Setup.txt"
+          cp "$build_root/LICENSES/MIT.txt" "$release_dir/MIT.txt"
+          cp "$build_root/LICENSES/httprouter-BSD-3-Clause.txt" "$release_dir/httprouter-BSD-3-Clause.txt"
+          cp "$build_root/LICENSES/MPL-2.0.txt" "$release_dir/MPL-2.0.txt"
+
+      - name: Generate SBOM
+        # 与源仓 package-metadata 相同的生成命令；失败（如依赖图解析受阻）时
+        # 跳过 bom，因为 R2/GitHub 发布均不依赖该文件。
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 \
+            mod -json -noserial -notimestamp -output "${GITHUB_WORKSPACE}/release/bom.cdx.json" . || {
+            echo "note: SBOM generation skipped (not release-critical)"
+          }
+
+      - name: Verify release manifest set (pre-checksum)
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          # 清单按 C 序 sorted；grep 去掉 bom.cdx.json 后其余文件必须逐一命中下面
+          # .github/release-assets.txt 的（非 SBOM）清单。
+          sort "$build_root/.github/release-assets.txt" | grep -v '^bom\.cdx\.json$' >/tmp/expected-assets.txt
+          comm -23 <(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort) /tmp/expected-assets.txt
+          [[ -z "$(comm -23 <(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort) /tmp/expected-assets.txt)" ]] || {
+            echo "unexpected or missing release assets" >&2
+            exit 1
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-transfer-binaries-${{ needs.resolve.outputs.version }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error
+
+  build-windows-setup:
+    needs: [resolve, build]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch ai-transfer source at exact SHA
+        # 仅需要 packaging/windows/*.iss，但按同一 SHA 取源，确保安装包与二进制一致。
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-transfer-binaries-${{ needs.resolve.outputs.version }}
+          path: ${{ github.workspace }}/release
+
+      - name: Build Windows setup with Inno Setup
+        # 与源仓 build-windows-setup job 相同的编译器路径与 iss 参数。
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          compiler="${ProgramFiles(x86)}\\Inno Setup 6\\ISCC.exe"
+          if [[ ! -f "$compiler" ]]; then
+            echo "Inno Setup compiler is unavailable: $compiler" >&2
+            exit 1
+          fi
+          "$compiler" \
+            "/DAppVersion=${RELEASE_VERSION}" \
+            "${GITHUB_WORKSPACE}/build-src/packaging/windows/ai-transfer.iss"
+          if [[ ! -f "${GITHUB_WORKSPACE}/release/ai-transfer-windows-setup.exe" ]]; then
+            echo "Windows setup was not generated" >&2
+            exit 1
+          fi
+
+      - name: Upload Windows setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-transfer-windows-setup-${{ needs.resolve.outputs.version }}
+          path: ${{ github.workspace }}/release/ai-transfer-windows-setup.exe
+          if-no-files-found: error
+
+  package:
+    needs: [resolve, build, build-windows-setup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ai-transfer-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+
+      - name: Verify complete release asset set and generate checksums
+        # 复用源仓的单一事实源 .github/release-assets.txt 与校验脚本。需要先
+        # 检出源文件（bom 生成用的也是它）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${GITHUB_WORKSPACE}"
+          git init -q "$base/.source"
+          git -C "$base/.source" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic $(printf 'cnb:%s' "${{ secrets.CNB_TOKEN }}" | base64 | tr -d '\n')" \
+            fetch --depth=1 "$SOURCE_URL" "${{ needs.resolve.outputs.source_sha }}"
+          git -C "$base/.source" checkout --force FETCH_HEAD
+
+          assets_dir="${{ runner.temp }}/assets"
+          test -f "$assets_dir/ai-transfer-windows-setup.exe" || {
+            echo "windows setup missing from merged assets" >&2
+            exit 1
+          }
+
+          # .github/release-assets.txt 以 bom.cdx.json 开头（C 序），全部文件必须命中。
+          RELEASE_ASSET_MANIFEST="$base/.source/.github/release-assets.txt" \
+            bash "$base/.source/.github/scripts/release-verify-assets.sh" "$assets_dir"
+
+          # 与源仓 package-checksums job 相同的生成方式：清单中除 SHA256SUMS 外的全部文件。
+          grep -vFx 'SHA256SUMS' "$base/.source/.github/release-assets.txt" \
+            >/tmp/checksum-targets
+          ( cd "$assets_dir" && xargs -a /tmp/checksum-targets -d '\n' sha256sum >SHA256SUMS )
+
+          # 生成后再次全量校验，保证 SHA256SUMS 自身与清单一致。
+          RELEASE_ASSET_MANIFEST="$base/.source/.github/release-assets.txt" \
+            bash "$base/.source/.github/scripts/release-verify-assets.sh" "$assets_dir"
+
+          echo "ASSETS_DIR=$assets_dir" >> "$GITHUB_ENV"
+          ls -l "$assets_dir"
+
+      - name: Upload complete release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-transfer-release-${{ needs.resolve.outputs.version }}
+          path: ${{ env.ASSETS_DIR }}
+          if-no-files-found: error
+
+  publish-r2:
+    needs: [resolve, package]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_BUCKET: releases
+      R2_PREFIX: ai-transfer
+    steps:
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download complete release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-transfer-release-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/ai-transfer-release
+
+      - name: Upload to Cloudflare R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/ai-transfer-release"
+
+          content_type() {
+            case "$1" in
+              *.exe|ai-transfer-*) printf 'application/octet-stream' ;;
+              *.json)             printf 'application/json' ;;
+              *)                  printf 'text/plain' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
+          for file in "$release_dir"/*; do
+            [[ -f "$file" ]] || continue
+            key="$(basename "$file")"
+            ct="$(content_type "$file")"
+            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" >/dev/null
+          done
+
+          echo "Done. Published under $PUBLIC_BASE_URL/"
+
+  publish-github:
+    needs: [resolve, package]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+      RELEASE_TAG: v${{ needs.resolve.outputs.version }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_TARGET: ${{ needs.resolve.outputs.source_sha }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          set -euo pipefail
+          type -P gh >/dev/null || {
+            curl -fsSL https://github.com/cli/cli/releases/download/v2.82.0/gh_2.82.0_linux_amd64.tar.gz \
+              | tar -xz -C /tmp gh_2.82.0_linux_amd64/bin/gh
+            echo "/tmp/gh_2.82.0_linux_amd64/bin" >> "$GITHUB_PATH"
+          }
+
+      - name: Download complete release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-transfer-release-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/ai-transfer-release
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/ai-transfer-release"
+
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          ## AiTransfer v${RELEASE_VERSION}
+
+          Cross-platform release: Linux (amd64/arm64), macOS (amd64/arm64), Windows (amd64).
+
+          ### Install
+
+          **Linux amd64 / arm64:**
+          \`\`\`bash
+          curl -fsSL https://releases.73zls.com/ai-transfer/ai-transfer-linux-amd64 \
+            -o ai-transfer && chmod +x ai-transfer
+          \`\`\`
+
+          **macOS（amd64 用 ai-transfer-macos-amd64，arm64 用 ai-transfer-macos-arm64）:**
+          \`\`\`bash
+          curl -fsSL https://releases.73zls.com/ai-transfer/ai-transfer-macos-arm64 \
+            -o ai-transfer && chmod +x ai-transfer
+          \`\`\`
+
+          **Windows:**
+          \`\`\`powershell
+          curl.exe -fsSL https://releases.73zls.com/ai-transfer/ai-transfer-windows-setup.exe \
+            -o ai-transfer-windows-setup.exe
+          \`\`\`
+
+          Verify with the attached \`SHA256SUMS\`.
+          EOF
+
+          create_args=(
+            --repo "$RELEASE_REPO"
+            --title "AiTransfer ${RELEASE_VERSION}"
+            --notes-file "${RUNNER_TEMP}/notes.md"
+            --target "$RELEASE_TARGET"
+          )
+          if [[ "$PRERELEASE" == "true" ]]; then
+            create_args+=(--prerelease)
+          else
+            create_args+=(--latest)
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; updating assets."
+            gh release edit "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
+              --title "AiTransfer ${RELEASE_VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              $( [[ "$PRERELEASE" != "true" ]] && printf '%s' '--latest' )
+          else
+            gh release create "$RELEASE_TAG" "${create_args[@]}"
+          fi
+
+          mapfile -t assets < <(find "$release_dir" -maxdepth 1 -type f | sort)
+          [[ "${#assets[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" --clobber
+
+          echo "Released: https://github.com/$RELEASE_REPO/releases/tag/$RELEASE_TAG"
