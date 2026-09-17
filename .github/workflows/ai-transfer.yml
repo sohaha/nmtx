@@ -170,7 +170,8 @@ jobs:
       - name: Wait for GitHub mirror sync
         # README 与 app 更新检查都从 GitHub Releases 下载/发现版本，release 会以
         # source_sha 打 tag，因此提交必须先出现在 GitHub 公共镜像上。镜像同步是
-        # 异步的，这里最多等 10 分钟。
+        # 异步的，这里最多等 10 分钟。仅在 publish=true（真正发布）时等待。
+        if: steps.payload.outputs.publish == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -315,7 +316,40 @@ jobs:
             exit 1
           }
 
+      - name: Stage R2 release documents
+        # README 与一键安装/卸载脚本只进 R2 发布目录（releases/ai-transfer/），
+        # 不参与 GitHub release 资产清单（release-assets.txt）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          r2_dir="${GITHUB_WORKSPACE}/r2-docs"
+          mkdir -p "$r2_dir"
+          for f in README.md install.sh install.ps1 uninstall.sh uninstall.ps1; do
+            cp "$build_root/scripts/release/$f" "$r2_dir/$f"
+          done
+          echo "R2_DOCS_DIR=$r2_dir" >> "$GITHUB_ENV"
+
+      - name: Validate shell scripts syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n "${{ env.R2_DOCS_DIR }}/install.sh"
+          bash -n "${{ env.R2_DOCS_DIR }}/uninstall.sh"
+
       - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-transfer-binaries-${{ needs.resolve.outputs.version }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error
+
+      - name: Upload R2 docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-transfer-r2docs-${{ needs.resolve.outputs.version }}
+          path: ${{ env.R2_DOCS_DIR }}
+          if-no-files-found: error
         uses: actions/upload-artifact@v4
         with:
           name: ai-transfer-binaries-${{ needs.resolve.outputs.version }}
@@ -388,11 +422,20 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - name: Download all release assets
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
-          pattern: ai-transfer-*
+          # 只合并发布资产（binaries + windows-setup），排除 r2docs artifact。
+          pattern: ai-transfer-(binaries|windows-setup)-*
           path: ${{ runner.temp }}/assets
+          merge-multiple: true
+
+      - name: Download R2 docs for reference
+        # r2docs 不走 release 资产清单，仅随 R2 publish 上传；此处不合并进 assets。
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ai-transfer-r2docs-*
+          path: ${{ runner.temp }}/r2docs
           merge-multiple: true
 
       - name: Verify complete release asset set and generate checksums
@@ -431,6 +474,8 @@ jobs:
 
           echo "ASSETS_DIR=$assets_dir" >> "$GITHUB_ENV"
           ls -l "$assets_dir"
+          echo "--- r2docs (not part of release manifest) ---"
+          ls -l "${{ runner.temp }}/r2docs"
 
       - name: Upload complete release assets
         uses: actions/upload-artifact@v4
@@ -457,6 +502,12 @@ jobs:
           name: ai-transfer-release-${{ needs.resolve.outputs.version }}
           path: ${{ runner.temp }}/ai-transfer-release
 
+      - name: Download R2 docs
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-transfer-r2docs-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/ai-transfer-r2docs
+
       - name: Upload to Cloudflare R2
         shell: bash
         env:
@@ -465,23 +516,29 @@ jobs:
         run: |
           set -euo pipefail
           release_dir="${{ runner.temp }}/ai-transfer-release"
+          docs_dir="${{ runner.temp }}/ai-transfer-r2docs"
 
           content_type() {
             case "$1" in
               *.exe|ai-transfer-*) printf 'application/octet-stream' ;;
               *.json)             printf 'application/json' ;;
+              *.sh)               printf 'text/x-shellscript' ;;
+              *.ps1)              printf 'text/plain; charset=utf-8' ;;
+              *.md)               printf 'text/markdown; charset=utf-8' ;;
               *)                  printf 'text/plain' ;;
             esac
           }
 
           echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
-          for file in "$release_dir"/*; do
-            [[ -f "$file" ]] || continue
-            key="$(basename "$file")"
-            ct="$(content_type "$file")"
-            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
-            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
-              --remote --file "$file" --content-type "$ct" >/dev/null
+          for dir in "$release_dir" "$docs_dir"; do
+            for file in "$dir"/*; do
+              [[ -f "$file" ]] || continue
+              key="$(basename "$file")"
+              ct="$(content_type "$file")"
+              printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+              wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+                --remote --file "$file" --content-type "$ct" >/dev/null
+            done
           done
 
           echo "Done. Published under $PUBLIC_BASE_URL/"
