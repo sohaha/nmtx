@@ -283,20 +283,27 @@ jobs:
           done
 
       - name: Stage release metadata
-        # 与源仓 package-metadata job 相同的许可/声明文件集合（bom.cdx.json 不
-        # 重复计入 release-assets.txt 清单，仅随元数据上传）。
+        # 与源仓 package-metadata job 相同的许可/声明文件集合。源仓 main 当前
+        # 缺根目录 LICENSE（清单与仓库不一致），此处对缺失文件容错：存在才复制。
         shell: bash
         run: |
           set -euo pipefail
           build_root="${GITHUB_WORKSPACE}/build-src"
           release_dir="${GITHUB_WORKSPACE}/release"
-          cp "$build_root/LICENSE" "$release_dir/LICENSE"
-          cp "$build_root/THIRD_PARTY_NOTICES.md" "$release_dir/THIRD_PARTY_NOTICES.md"
-          cp "$build_root/LICENSES/Apache-2.0.txt" "$release_dir/Apache-2.0.txt"
-          cp "$build_root/LICENSES/Inno-Setup.txt" "$release_dir/Inno-Setup.txt"
-          cp "$build_root/LICENSES/MIT.txt" "$release_dir/MIT.txt"
-          cp "$build_root/LICENSES/httprouter-BSD-3-Clause.txt" "$release_dir/httprouter-BSD-3-Clause.txt"
-          cp "$build_root/LICENSES/MPL-2.0.txt" "$release_dir/MPL-2.0.txt"
+          for f in \
+            "LICENSE" \
+            "THIRD_PARTY_NOTICES.md" \
+            "LICENSES/Apache-2.0.txt" \
+            "LICENSES/Inno-Setup.txt" \
+            "LICENSES/MIT.txt" \
+            "LICENSES/httprouter-BSD-3-Clause.txt" \
+            "LICENSES/MPL-2.0.txt"; do
+            if [[ -f "$build_root/$f" ]]; then
+              cp "$build_root/$f" "$release_dir/$(basename "$f")"
+            else
+              echo "note: $f missing in source, skipping"
+            fi
+          done
 
       - name: Generate SBOM
         # 与源仓 package-metadata 相同的生成命令；失败（如依赖图解析受阻）时
@@ -521,6 +528,13 @@ jobs:
           set -euo pipefail
           release_dir="${{ runner.temp }}/ai-transfer-release"
           docs_dir="${{ runner.temp }}/ai-transfer-r2docs"
+          version="v${{ needs.resolve.outputs.version }}"
+
+          # latest.json 是应用内更新检查（releasecheck）读取的唯一清单，格式
+          # 必须与 internal/releasecheck/client.go 的 manifestPayload 一致。
+          cat > "$docs_dir/latest.json" <<EOF
+          {"version":"${version}","release_url":"$PUBLIC_BASE_URL/","published_at_ms":$(date +%s%3N)}
+          EOF
 
           content_type() {
             case "$1" in
@@ -533,15 +547,27 @@ jobs:
             esac
           }
 
+          # 缓存策略：latest.json 是更新检查的唯一事实源，必须每次回源
+          # （no-cache），否则发布新版本后客户端会长期读到旧版本；其余对象
+          # 每次发布覆盖同名 key，用 1h 短缓存平衡 CDN 命中与新鲜度。
+          cache_control() {
+            if [[ "$(basename "$1")" == "latest.json" ]]; then
+              printf 'no-cache, must-revalidate'
+            else
+              printf 'public, max-age=3600'
+            fi
+          }
+
           echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
           for dir in "$release_dir" "$docs_dir"; do
             for file in "$dir"/*; do
               [[ -f "$file" ]] || continue
               key="$(basename "$file")"
               ct="$(content_type "$file")"
-              printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+              cc="$(cache_control "$file")"
+              printf '  put %s/%s (%s)\n' "$R2_PREFIX" "$key" "$cc"
               wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
-                --remote --file "$file" --content-type "$ct" >/dev/null
+                --remote --file "$file" --content-type "$ct" --cache-control "$cc" >/dev/null
             done
           done
 
