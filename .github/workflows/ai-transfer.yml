@@ -240,15 +240,14 @@ jobs:
           cache: pnpm
           cache-dependency-path: build-src/web/pnpm-lock.yaml
 
-      - name: Validate and build embedded web assets
-        # 与源仓 .github/actions/web-ci 相同命令链（lint + format + build）。
+      - name: Build embedded web assets
+        # nmtx 层只负责编译发布（与 ai-ling 的 nmtx workflow 一致）；lint/format
+        # 由源仓负责，不在此阻塞发布。pnpm build 已包含 type-check。
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           pnpm --dir web install --frozen-lockfile
-          pnpm --dir web run lint
-          pnpm --dir web run format
           pnpm --dir web run build
           test -f internal/webui/dist/index.html
 
