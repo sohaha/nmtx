@@ -169,16 +169,26 @@ jobs:
 
       - name: Wait for GitHub mirror sync
         # README 与 app 更新检查都从 GitHub Releases 下载/发现版本，release 会以
-        # source_sha 打 tag，因此提交必须先出现在 GitHub 公共镜像上。镜像同步是
-        # 异步的，这里最多等 10 分钟。仅在 publish=true（真正发布）时等待。
+        # source_sha 打 tag，因此提交必须先出现在 GitHub 镜像上。sohaha/ai-transfer
+        # 是私有仓库，匿名 ls-remote 会 401，必须用 CODEBAY_RELEASE_WRITE_TOKEN
+        # （对 sohaha/ai-transfer 有读权限的 PAT）做 basic auth。镜像同步是异步的，
+        # 这里最多等 10 分钟；仅在 publish=true（真正发布）时等待。
         if: steps.payload.outputs.publish == 'true'
         shell: bash
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
         run: |
           set -euo pipefail
           source_sha="${{ steps.source.outputs.source_sha }}"
+          auth_token="$(printf 'x-access-token:%s' "$GH_MIRROR_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${auth_token}"
+          )
           echo "Waiting for $GH_SOURCE_URL to expose $source_sha ..."
           for ((i = 1; i <= 120; i++)); do
-            if git ls-remote "$GH_SOURCE_URL" refs/heads/main 2>/dev/null | grep -q "^$source_sha"; then
+            if git "${auth_args[@]}" ls-remote "$GH_SOURCE_URL" refs/heads/main 2>/dev/null | grep -q "^$source_sha"; then
               echo "GitHub mirror synced."
               exit 0
             fi
