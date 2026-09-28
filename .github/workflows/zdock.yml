@@ -309,6 +309,10 @@ jobs:
           ZDOCK_DISABLE_UPDATER: '1'
           ADOCK_SKIP_BUNDLE: '1'
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_CODESIGN_IDENTITY }}
+          # run-tauri.mjs resolves @tauri-apps/cli relative to scripts/. Under
+          # pnpm's isolated node_modules the CLI lives in apps/desktop, so point
+          # NODE_PATH at it instead of relying on npm-style hoisting.
+          NODE_PATH: ${{ github.workspace }}/build-src/apps/desktop/node_modules
         run: node scripts/build-tauri.mjs build
 
       - name: Notarize and staple the DMG
@@ -455,6 +459,7 @@ jobs:
           ZDOCK_NODE_MODE: ${{ matrix.mode }}
           ZDOCK_DISABLE_UPDATER: '1'
           ADOCK_SKIP_BUNDLE: '1'
+          NODE_PATH: ${{ github.workspace }}/build-src/apps/desktop/node_modules
         run: node scripts/build-tauri.mjs build
 
       - name: Stage release asset
@@ -582,6 +587,7 @@ jobs:
           ZDOCK_NODE_MODE: ${{ matrix.mode }}
           ZDOCK_DISABLE_UPDATER: '1'
           ADOCK_SKIP_BUNDLE: '1'
+          NODE_PATH: ${{ github.workspace }}/build-src/apps/desktop/node_modules
         run: node scripts/build-tauri.mjs build
 
       - name: Stage release assets
