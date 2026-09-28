@@ -225,11 +225,11 @@ jobs:
 
       - name: Verify source version
         shell: bash
+        working-directory: build-src
         run: |
           set -euo pipefail
-          src="${GITHUB_WORKSPACE}/build-src"
-          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
-          pkg_version="$(node -p "require('${src}/package.json').version")"
+          conf_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('./package.json').version")"
           if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
             echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
             exit 1
@@ -417,11 +417,11 @@ jobs:
 
       - name: Verify source version
         shell: bash
+        working-directory: build-src
         run: |
           set -euo pipefail
-          src="${GITHUB_WORKSPACE}/build-src"
-          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
-          pkg_version="$(node -p "require('${src}/package.json').version")"
+          conf_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('./package.json').version")"
           if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
             echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
             exit 1
@@ -544,11 +544,11 @@ jobs:
 
       - name: Verify source version
         shell: bash
+        working-directory: build-src
         run: |
           set -euo pipefail
-          src="${GITHUB_WORKSPACE}/build-src"
-          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
-          pkg_version="$(node -p "require('${src}/package.json').version")"
+          conf_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('./package.json').version")"
           if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
             echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
             exit 1
