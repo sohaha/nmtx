@@ -1,0 +1,717 @@
+name: Build Zdock Release
+
+# Zdock is a Tauri desktop app. This workflow builds the installers on GitHub
+# runners from the CNB source (so no GitHub code mirror is required), then
+# uploads the stable, download-ready assets plus a `latest.json` manifest and an
+# install README to Cloudflare R2 under https://releases.73zls.com/zdock.
+#
+# Trigger it from the source repo:
+#   mise run nmtx:ci            # or: bash scripts/nmtx-ci.sh
+# or manually from the GitHub UI / API (workflow_dispatch / repository_dispatch).
+#
+# Bundled builds ship their own Node runtime — the supported, self-contained
+# download. System builds reuse the machine's Node 24+ runtime and are offered
+# as a separate, smaller download.
+#
+# Updater artifacts (Zdock.app.tar.gz/.sig + a Tauri latest.json) are
+# intentionally disabled here: the in-app updater feed lives on cdn.zdock.sh and
+# is published by the source repo's own release workflow, not by nmtx. This
+# workflow only produces standalone installers.
+#
+# The web bundle is produced with Vite directly (`vite build`) rather than
+# `pnpm build:web`, because that script also runs `tsc --noEmit`. Typechecking is
+# owned by the source repo's own workflows; the packaging pipeline only needs a
+# valid bundle so that installers still ship while type-level refactors are in
+# flight.
+
+on:
+  repository_dispatch:
+    types: [build-zdock-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: dev
+        description: Agent-dock branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.0.1.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/agent-dock
+  RELEASE_PUBLIC_BASE_URL: https://releases.73zls.com/zdock
+  R2_BUCKET: releases
+  R2_PREFIX: zdock
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-dev}"
+            version="${DISPATCH_VERSION:-}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+          fi
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/agent-dock/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            APPLE_CERTIFICATE_P12 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_NOTARIZATION_KEY_P8 \
+            APPLE_NOTARIZATION_KEY_ID \
+            APPLE_NOTARIZATION_ISSUER_ID \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$({
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF"
+            } | awk 'NR == 1 { print $1 }')"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve Zdock source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, mode: bundled, arch: arm64 }
+          - { runner: macos-latest, mode: system, arch: arm64 }
+          - { runner: macos-15-intel, mode: bundled, arch: x64 }
+          - { runner: macos-15-intel, mode: system, arch: x64 }
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v4
+
+      - name: Fetch Zdock source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'build-src/apps/desktop/src-tauri -> target'
+          key: macos-${{ matrix.mode }}-${{ matrix.arch }}
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${GITHUB_WORKSPACE}/build-src"
+          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('${src}/package.json').version")"
+          if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
+            echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        working-directory: build-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web frontend
+        working-directory: build-src
+        run: pnpm --filter @zdock/web exec vite build
+
+      - name: Bundle the Node server resources
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+        run: pnpm bundle:server
+
+      - name: Verify mode-specific resources
+        working-directory: build-src
+        env:
+          ZDOCK_SERVER_MODE: ${{ matrix.mode }}
+        run: >-
+          node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/resources/server/runtime.json')); const hasNode=fs.existsSync('apps/desktop/src-tauri/resources/server/node') || fs.existsSync('apps/desktop/src-tauri/resources/server/node.exe'); if(r.mode!==process.env.ZDOCK_SERVER_MODE || (r.mode==='system' && hasNode) || (r.mode==='bundled' && !hasNode)) process.exit(1)"
+
+      - name: Configure Apple code signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/actions/macos-code-sign/signing_helpers.sh"
+
+          cert_path="${RUNNER_TEMP}/apple_signing_certificate.p12"
+          keychain_path="${RUNNER_TEMP}/zdock-signing.keychain-db"
+          configure_apple_code_signing \
+            "$APPLE_CERTIFICATE_P12" \
+            "$APPLE_CERTIFICATE_PASSWORD" \
+            "$cert_path" \
+            "$keychain_path" \
+            actions
+
+          {
+            echo "APPLE_CODESIGN_IDENTITY=$APPLE_CODESIGN_IDENTITY"
+            echo "APPLE_CODESIGN_KEYCHAIN=$APPLE_CODESIGN_KEYCHAIN"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::$APPLE_CODESIGN_IDENTITY"
+
+      - name: Sign bundled server binaries
+        shell: bash
+        working-directory: build-src
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          RES="apps/desktop/src-tauri/resources/server"
+          ENT="apps/desktop/src-tauri/entitlements.plist"
+
+          # The Node runtime needs JIT entitlements under the hardened runtime;
+          # the native addons only need a hardened-runtime signature.
+          if [ -f "$RES/node" ]; then
+            codesign --force --options runtime --entitlements "$ENT" \
+              --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$RES/node"
+          fi
+          find "$RES" \( -name "*.node" -o -name "spawn-helper" \) -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$f"
+              done
+
+      - name: Build, sign & package
+        shell: bash
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+          ZDOCK_DISABLE_UPDATER: '1'
+          ADOCK_SKIP_BUNDLE: '1'
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_CODESIGN_IDENTITY }}
+        run: node scripts/build-tauri.mjs build
+
+      - name: Notarize and staple the DMG
+        shell: bash
+        working-directory: build-src
+        env:
+          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/.github/actions/macos-code-sign/signing_helpers.sh"
+          source "${GITHUB_WORKSPACE}/.github/actions/macos-code-sign/notary_helpers.sh"
+
+          notary_key_path="${RUNNER_TEMP}/zdock-notarytool.key.p8"
+          write_notary_key "$APPLE_NOTARIZATION_KEY_P8" "$notary_key_path"
+
+          dmg="$(find apps/desktop/src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [[ -n "$dmg" ]] || { echo "no DMG produced by tauri build"; exit 1; }
+
+          notarize_submission "Zdock ${RELEASE_VERSION} DMG" "$dmg" "$notary_key_path"
+          retry_notary_command "staple DMG" xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          rm -f "$notary_key_path"
+
+      - name: Stage release asset
+        shell: bash
+        env:
+          MODE: ${{ matrix.mode }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          src_dir="build-src/apps/desktop/src-tauri/target/release/bundle"
+          # Keep the staging dir workspace-relative: $RUNNER_TEMP is a Windows path
+          # on windows runners and does not round-trip through git-bash.
+          out="release-assets"
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          dmg="$(find "$src_dir/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [[ -n "$dmg" ]] || { echo "missing DMG in $src_dir/dmg"; exit 1; }
+
+          if [ "$MODE" = "system" ]; then prefix="Zdock-System"; else prefix="Zdock"; fi
+          cp "$dmg" "$out/${prefix}-v${RELEASE_VERSION}-macos-${ARCH}.dmg"
+          ls -lh "$out"
+
+      - name: Upload macOS ${{ matrix.mode }} ${{ matrix.arch }} package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.mode }}-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-windows:
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, mode: bundled, arch: x64 }
+          - { runner: windows-latest, mode: system, arch: x64 }
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v4
+
+      - name: Fetch Zdock source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'build-src/apps/desktop/src-tauri -> target'
+          key: windows-${{ matrix.mode }}-${{ matrix.arch }}
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${GITHUB_WORKSPACE}/build-src"
+          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('${src}/package.json').version")"
+          if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
+            echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        working-directory: build-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web frontend
+        working-directory: build-src
+        run: pnpm --filter @zdock/web exec vite build
+
+      - name: Bundle the Node server resources
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+        run: pnpm bundle:server
+
+      - name: Verify mode-specific resources
+        working-directory: build-src
+        env:
+          ZDOCK_SERVER_MODE: ${{ matrix.mode }}
+        run: >-
+          node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/resources/server/runtime.json')); const hasNode=fs.existsSync('apps/desktop/src-tauri/resources/server/node') || fs.existsSync('apps/desktop/src-tauri/resources/server/node.exe'); if(r.mode!==process.env.ZDOCK_SERVER_MODE || (r.mode==='system' && hasNode) || (r.mode==='bundled' && !hasNode)) process.exit(1)"
+
+      - name: Build & package
+        shell: bash
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+          ZDOCK_DISABLE_UPDATER: '1'
+          ADOCK_SKIP_BUNDLE: '1'
+        run: node scripts/build-tauri.mjs build
+
+      - name: Stage release asset
+        shell: bash
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          src_dir="build-src/apps/desktop/src-tauri/target/release/bundle"
+          out="release-assets"
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          exe="$(find "$src_dir/nsis" -maxdepth 1 -type f -name '*.exe' -print -quit)"
+          [[ -n "$exe" ]] || { echo "missing NSIS installer in $src_dir/nsis"; exit 1; }
+
+          if [ "$MODE" = "system" ]; then prefix="Zdock-System"; else prefix="Zdock"; fi
+          cp "$exe" "$out/${prefix}-v${RELEASE_VERSION}-windows-x64-setup.exe"
+          ls -lh "$out"
+
+      - name: Upload Windows ${{ matrix.mode }} x64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.mode }}-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-linux:
+    needs: resolve
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { mode: bundled, arch: x64 }
+          - { mode: system, arch: x64 }
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v4
+
+      - name: Fetch Zdock source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl \
+            wget file libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'build-src/apps/desktop/src-tauri -> target'
+          key: linux-${{ matrix.mode }}-${{ matrix.arch }}
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${GITHUB_WORKSPACE}/build-src"
+          conf_version="$(node -p "require('${src}/apps/desktop/src-tauri/tauri.conf.json').version")"
+          pkg_version="$(node -p "require('${src}/package.json').version")"
+          if [[ "$conf_version" != "$RELEASE_VERSION" || "$pkg_version" != "$RELEASE_VERSION" ]]; then
+            echo "workflow version $RELEASE_VERSION does not match tauri.conf.json ($conf_version) / package.json ($pkg_version)"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        working-directory: build-src
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web frontend
+        working-directory: build-src
+        run: pnpm --filter @zdock/web exec vite build
+
+      - name: Bundle the Node server resources
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+        run: pnpm bundle:server
+
+      - name: Verify mode-specific resources
+        working-directory: build-src
+        env:
+          ZDOCK_SERVER_MODE: ${{ matrix.mode }}
+        run: >-
+          node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/resources/server/runtime.json')); const hasNode=fs.existsSync('apps/desktop/src-tauri/resources/server/node') || fs.existsSync('apps/desktop/src-tauri/resources/server/node.exe'); if(r.mode!==process.env.ZDOCK_SERVER_MODE || (r.mode==='system' && hasNode) || (r.mode==='bundled' && !hasNode)) process.exit(1)"
+
+      - name: Build & package
+        shell: bash
+        working-directory: build-src
+        env:
+          ZDOCK_NODE_MODE: ${{ matrix.mode }}
+          ZDOCK_DISABLE_UPDATER: '1'
+          ADOCK_SKIP_BUNDLE: '1'
+        run: node scripts/build-tauri.mjs build
+
+      - name: Stage release assets
+        shell: bash
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          src_dir="build-src/apps/desktop/src-tauri/target/release/bundle"
+          out="release-assets"
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          if [ "$MODE" = "system" ]; then prefix="Zdock-System"; else prefix="Zdock"; fi
+
+          appimage="$(find "$src_dir/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          [[ -n "$appimage" ]] || { echo "missing AppImage in $src_dir/appimage"; exit 1; }
+          cp "$appimage" "$out/${prefix}-v${RELEASE_VERSION}-linux-x64.AppImage"
+
+          deb="$(find "$src_dir/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          [[ -n "$deb" ]] || { echo "missing deb in $src_dir/deb"; exit 1; }
+          cp "$deb" "$out/${prefix}-v${RELEASE_VERSION}-linux-x64.deb"
+
+          ls -lh "$out"
+
+      - name: Upload Linux ${{ matrix.mode }} x64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.mode }}-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f | wc -l)" -eq 10
+          find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Prepare R2 payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-zdock-release-assets.mjs \
+            "${RUNNER_TEMP}/release-assets" \
+            "${RUNNER_TEMP}/release-publish" \
+            "$VERSION" \
+            "$RELEASE_PUBLIC_BASE_URL"
+          cp .github/release-assets/README.md "${RUNNER_TEMP}/release-publish/README.md"
+          cat "${RUNNER_TEMP}/release-publish/latest.json"
+
+      - name: Upload latest release to R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/release-publish"
+          current_manifest_url="$RELEASE_PUBLIC_BASE_URL/latest.json"
+          previous_manifest="${RUNNER_TEMP}/previous-latest.json"
+
+          if curl --fail --silent --show-error --location "$current_manifest_url" > "$previous_manifest"; then
+            echo "Loaded previous manifest from $current_manifest_url"
+          else
+            rm -f "$previous_manifest"
+            echo "No previous manifest found; publishing fresh prefix"
+          fi
+
+          content_type() {
+            case "$1" in
+              *.json) printf 'application/json' ;;
+              *.md) printf 'text/markdown; charset=utf-8' ;;
+              *.dmg) printf 'application/x-apple-diskimage' ;;
+              *.exe) printf 'application/vnd.microsoft.portable-executable' ;;
+              *.AppImage) printf 'application/octet-stream' ;;
+              *.deb) printf 'application/vnd.debian.binary-package' ;;
+              *) printf 'application/octet-stream' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
+          for file in "$release_dir"/*; do
+            [[ -f "$file" ]] || continue
+            key="$(basename "$file")"
+            ct="$(content_type "$file")"
+            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" >/dev/null
+          done
+
+          if [[ -f "$previous_manifest" ]]; then
+            mapfile -t old_assets < <(jq -r '.assets[]?.name // empty' "$previous_manifest")
+            mapfile -t new_assets < <(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            for asset in "${old_assets[@]}"; do
+              keep=0
+              for current in "${new_assets[@]}"; do
+                if [[ "$asset" == "$current" ]]; then
+                  keep=1
+                  break
+                fi
+              done
+              if [[ "$keep" -eq 0 ]]; then
+                printf '  delete %s/%s\n' "$R2_PREFIX" "$asset"
+                wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$asset" --remote >/dev/null 2>&1 || true
+              fi
+            done
+          fi
+
+          echo "Published https://releases.73zls.com/zdock/ (version ${RELEASE_VERSION})"
