@@ -13,6 +13,10 @@ name: Build Zeno Computer Release
 #   zeno/<version>/<file>         binaries + .sha256 / .gz / wasm / SHA256SUMS
 #   zeno/install.sh, install.ps1  bucket-root installers
 #
+# Retention: the bucket keeps only the two most recently PUBLISHED versions
+# per channel (--retain 2; recency by published_at, not semver). The prune
+# step in publish-r2 deletes the object trees of dropped versions.
+#
 # Trigger from the source repo: `mise run nmtx:ci` (scripts/mise/nmtx-ci.sh)
 # or a repository_dispatch with type `build-zeno-computer-release`.
 
@@ -29,7 +33,7 @@ on:
       version:
         required: true
         type: string
-        description: Release version, for example 1.0.28 or 1.0.28-rc.1.
+        description: Release version, for example 0.0.1 or 0.0.1-rc.1.
       release_tag:
         required: false
         type: string
@@ -48,6 +52,11 @@ on:
         type: boolean
         default: false
         description: Also create/update a GitHub release on RELEASE_REPO (requires the repo to exist).
+      retain:
+        required: false
+        type: string
+        default: "2"
+        description: "Bucket retention: keep the N most recently published versions per channel. Use 1 once to wipe older lines."
 
 permissions:
   contents: read
@@ -79,6 +88,7 @@ jobs:
       channel: ${{ steps.payload.outputs.channel }}
       publish: ${{ steps.payload.outputs.publish }}
       github_release: ${{ steps.payload.outputs.github_release }}
+      retain: ${{ steps.payload.outputs.retain }}
     steps:
       - name: Resolve payload
         id: payload
@@ -91,12 +101,14 @@ jobs:
           DISPATCH_CHANNEL: ${{ github.event.client_payload.channel }}
           DISPATCH_PUBLISH: ${{ github.event.client_payload.publish }}
           DISPATCH_GITHUB_RELEASE: ${{ github.event.client_payload.github_release }}
+          DISPATCH_RETAIN: ${{ github.event.client_payload.retain }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_CHANNEL: ${{ inputs.channel }}
           INPUT_PUBLISH: ${{ inputs.publish }}
           INPUT_GITHUB_RELEASE: ${{ inputs.github_release }}
+          INPUT_RETAIN: ${{ inputs.retain }}
         run: |
           set -euo pipefail
 
@@ -113,6 +125,7 @@ jobs:
           channel="$(pick "$DISPATCH_CHANNEL" "$INPUT_CHANNEL" "")"
           publish="$(pick "$DISPATCH_PUBLISH" "$INPUT_PUBLISH" true)"
           github_release="$(pick "$DISPATCH_GITHUB_RELEASE" "$INPUT_GITHUB_RELEASE" false)"
+          retain="$(pick "$DISPATCH_RETAIN" "$INPUT_RETAIN" 2)"
 
           if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/bots/-/commit/([0-9a-f]{40})/?$ ]]; then
             source_ref="${BASH_REMATCH[1]}"
@@ -141,6 +154,10 @@ jobs:
           }
           case "$publish" in true|1|yes) publish=true ;; *) publish=false ;; esac
           case "$github_release" in true|1|yes) github_release=true ;; *) github_release=false ;; esac
+          [[ "$retain" =~ ^[0-9]+$ ]] || {
+            echo "invalid retain: $retain (non-negative integer)"
+            exit 1
+          }
 
           {
             echo "source_ref=$source_ref"
@@ -149,6 +166,7 @@ jobs:
             echo "channel=$channel"
             echo "publish=$publish"
             echo "github_release=$github_release"
+            echo "retain=$retain"
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate required secrets
@@ -344,6 +362,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      RELEASE_RETAIN: ${{ needs.resolve.outputs.retain }}
     steps:
       - name: Fetch zbot source at exact SHA
         # prepare-zeno-release.mjs + install.sh/install.ps1 ship from the same
@@ -403,6 +422,7 @@ jobs:
             --channel "$RELEASE_CHANNEL" \
             --node-version "$NODE_VERSION" \
             --required-targets linux-x64,linux-arm64,win32-x64,darwin-arm64,darwin-x64 \
+            --retain "$RELEASE_RETAIN" \
             --repo "$SOURCE_REPO" \
             --source-sha "${{ needs.resolve.outputs.source_sha }}" \
             "${extra[@]}"
@@ -430,6 +450,19 @@ jobs:
         with:
           name: zeno-release-${{ needs.resolve.outputs.version }}
           path: ${{ runner.temp }}/zeno-release
+
+      - name: Snapshot the published versions index
+        # The prune step diffs this snapshot against the new index, so it must
+        # run BEFORE the upload below overwrites versions.json.
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="${{ runner.temp }}/versions.before.json"
+          if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/versions.json" -o "$existing" 2>/dev/null; then
+            echo "VERSIONS_BEFORE=$existing" >> "$GITHUB_ENV"
+          else
+            echo "no published versions.json yet (first release)"
+          fi
 
       - name: Upload to Cloudflare R2
         shell: bash
@@ -477,6 +510,49 @@ jobs:
           done < <(find "$release_dir" -type f -print0)
 
           echo "Done. Published under $PUBLIC_BASE_URL/"
+
+      - name: Prune versions beyond retention
+        # --retain (Assemble step) already capped the new versions.json; this
+        # step deletes the R2 objects of every version that fell out of the
+        # index. Per-version object names are derived from that version's
+        # manifest (binary + .gz + .sha256 sidecars + wasm) plus the fixed
+        # manifest.json/SHA256SUMS/provenance.txt trio — this pipeline is the
+        # only writer of <version>/ dirs.
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${VERSIONS_BEFORE:-}" ]] || { echo "no previous index; nothing to prune"; exit 0; }
+          new_index="${{ runner.temp }}/zeno-release/versions.json"
+
+          mapfile -t dropped < <(comm -23 \
+            <(jq -r '.versions[].version' "$VERSIONS_BEFORE" | sort -u) \
+            <(jq -r '.versions[].version' "$new_index" | sort -u))
+          [[ ${#dropped[@]} -gt 0 && -n "${dropped[0]}" ]] || { echo "no versions dropped from index; nothing to prune"; exit 0; }
+
+          delete_key() {
+            printf '  delete %s/%s\n' "$R2_PREFIX" "$1"
+            wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$1" --remote >/dev/null
+          }
+
+          for version in "${dropped[@]}"; do
+            echo "Pruning $version"
+            manifest="${{ runner.temp }}/manifest.$version.json"
+            if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/$version/manifest.json" -o "$manifest"; then
+              while IFS= read -r name; do
+                delete_key "$version/$name"
+                delete_key "$version/$name.sha256"
+              done < <(jq -r '[.targets[].file, .targets[].gz.file, .photonWasm.file] | flatten | map(select(. != null)) | unique | .[]' "$manifest")
+            else
+              echo "  manifest.json unreachable; deleting fixed keys only"
+            fi
+            delete_key "$version/SHA256SUMS"
+            delete_key "$version/provenance.txt"
+            delete_key "$version/manifest.json"
+          done
+          echo "Prune complete: ${#dropped[@]} version(s) removed"
 
   publish-github:
     needs: [resolve, package]
