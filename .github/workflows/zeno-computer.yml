@@ -245,7 +245,9 @@ jobs:
           - runner: macos-15
             platform: darwin
             arch: x64
-            strip: "1"
+            # Xcode strip rejects the official darwin-x64 carrier
+            # ("link edit information does not fill the __LINKEDIT segment").
+            strip: "0"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -275,7 +277,8 @@ jobs:
         run: |
           set -euo pipefail
           build_root="${GITHUB_WORKSPACE}/build-src"
-          package_version="$(node -p "require('$build_root/packages/computer/package.json').version")"
+          cd "$build_root"
+          package_version="$(node -p "require('./packages/computer/package.json').version")"
           if [[ "$RELEASE_VERSION" != "$package_version" && ! "$RELEASE_VERSION" =~ ^${package_version//./\\.}-rc\.[0-9]+$ ]]; then
             echo "workflow version $RELEASE_VERSION does not match packages/computer version $package_version"
             echo "(rc builds carry the base package version: computer-v${package_version}-rc.N)"
