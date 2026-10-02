@@ -358,7 +358,7 @@ jobs:
             --node-version "$NODE_VERSION" \
             --web-dist packages/web/dist \
             --out-dir "$RUNNER_TEMP/zeno-sea-out" \
-            "${extra[@]}"
+            ${extra[@]+"${extra[@]}"}
 
       - name: Stage release files
         shell: bash
