@@ -244,7 +244,14 @@ jobs:
         include:
           # Each leg builds for the runner's own platform/arch — the external
           # node_modules closure (argon2/sharp/pglite wasm) must match the
-          # target, so cross-compiling legs are intentionally absent.
+          # target. Exception: darwin-x64 builds on an arm64 macos-15 host
+          # (macos-13 x64 runners queue for hours / are being retired) — the
+          # repo install stays arm64 so build tools (esbuild/postject) run
+          # natively, while the runtime closure comes from a scratch npm
+          # install with --cpu/--os (argon2 ships all-platform prebuilds,
+          # pglite/jieba are arch-neutral wasm, only sharp's @img/* variants
+          # need the switch). build.mjs's --version smoke self-skips on arch
+          # mismatch.
           - runner: ubuntu-latest
             platform: linux
             arch: x64
@@ -257,9 +264,10 @@ jobs:
           - runner: macos-15
             platform: darwin
             arch: arm64
-          - runner: macos-13
+          - runner: macos-15
             platform: darwin
             arch: x64
+            cross: "1"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -299,6 +307,35 @@ jobs:
           # NOT needed here — the dist arrives as an artifact.
           pnpm install --frozen-lockfile --filter "@botiverse/raft-server..."
 
+      - name: Install cross-arch runtime deps
+        if: matrix.cross == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          scratch="${RUNNER_TEMP}/zeno-runtime-modules"
+          mkdir -p "$scratch"
+          # Pin the runtime externals to the exact versions the workspace
+          # lockfile resolved — read them from the already-installed packages.
+          cd "$build_root"
+          SCRATCH="$scratch" node -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const pkgs = JSON.parse(fs.readFileSync("packages/server/scripts/native/external-packages.json", "utf8"));
+            const deps = {};
+            for (const p of pkgs) {
+              deps[p] = JSON.parse(fs.readFileSync(path.join("packages/server/node_modules", p, "package.json"), "utf8")).version;
+            }
+            fs.writeFileSync(path.join(process.env.SCRATCH, "package.json"),
+              JSON.stringify({ name: "zeno-runtime-deps", private: true, version: "0.0.0", dependencies: deps }, null, 2));
+          '
+          # npm --cpu/--os selects the matching platform variants for optional
+          # native deps (e.g. @img/sharp-darwin-x64); flat layout is exactly
+          # what the payload's node_modules needs.
+          cd "$scratch"
+          npm install --cpu="${{ matrix.arch }}" --os="${{ matrix.platform }}" --omit=dev --no-audit --no-fund
+          echo "RUNTIME_MODULES_ROOT=$scratch" >> "$GITHUB_ENV"
+
       - name: Download web dist artifact
         uses: actions/download-artifact@v4
         with:
@@ -310,13 +347,18 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
+          extra=()
+          if [[ -n "${RUNTIME_MODULES_ROOT:-}" ]]; then
+            extra+=(--runtime-modules-root "$RUNTIME_MODULES_ROOT")
+          fi
           node packages/server/scripts/native/build.mjs \
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "$RELEASE_VERSION" \
             --node-version "$NODE_VERSION" \
             --web-dist packages/web/dist \
-            --out-dir "$RUNNER_TEMP/zeno-sea-out"
+            --out-dir "$RUNNER_TEMP/zeno-sea-out" \
+            "${extra[@]}"
 
       - name: Stage release files
         shell: bash
