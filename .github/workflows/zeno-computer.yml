@@ -1,0 +1,556 @@
+name: Build Zeno Computer Release
+
+# zeno-computer SEA release pipeline: fetches zls_nmtx/sohaha/bots at an exact
+# SHA, builds one single-executable binary per (platform, arch) via
+# packages/computer/scripts/native/build.mjs, assembles the R2 release tree
+# with scripts/prepare-zeno-release.mjs, and publishes to
+# https://releases.73zls.com/zeno (bucket `releases`, prefix `zeno/`):
+#
+#   zeno/manifest.json            latest pointer {"name","version"} (no-cache)
+#   zeno/alpha/manifest.json      alpha pointer for rc builds (no-cache)
+#   zeno/versions.json            release index for `channel versions` (no-cache)
+#   zeno/<version>/manifest.json  per-version target manifest
+#   zeno/<version>/<file>         binaries + .sha256 / .gz / wasm / SHA256SUMS
+#   zeno/install.sh, install.ps1  bucket-root installers
+#
+# Trigger from the source repo: `mise run nmtx:ci` (scripts/mise/nmtx-ci.sh)
+# or a repository_dispatch with type `build-zeno-computer-release`.
+
+on:
+  repository_dispatch:
+    types: [build-zeno-computer-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: dev
+        description: zbot (bots) branch, tag, bare 40-char SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 1.0.28 or 1.0.28-rc.1.
+      release_tag:
+        required: false
+        type: string
+        description: Optional GitHub release tag. Defaults to computer-v<version>.
+      channel:
+        required: false
+        type: string
+        description: "Release channel: latest or alpha. Empty = alpha when the version is a prerelease, else latest."
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Upload the release tree to R2 (disable for a build-only smoke run).
+      github_release:
+        required: false
+        type: boolean
+        default: false
+        description: Also create/update a GitHub release on RELEASE_REPO (requires the repo to exist).
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/bots
+  SOURCE_REPO: zls_nmtx/sohaha/bots
+  # GitHub mirror repo that receives the release assets when github_release=true.
+  RELEASE_REPO: sohaha/zeno-computer-release
+  PUBLIC_BASE_URL: https://releases.73zls.com/zeno
+  R2_BUCKET: releases
+  R2_PREFIX: zeno
+  # Host node major must equal the SEA carrier major (build.mjs asserts it).
+  NODE_VERSION: "24.15.0"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      release_tag: ${{ steps.payload.outputs.release_tag }}
+      channel: ${{ steps.payload.outputs.channel }}
+      publish: ${{ steps.payload.outputs.publish }}
+      github_release: ${{ steps.payload.outputs.github_release }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+          DISPATCH_CHANNEL: ${{ github.event.client_payload.channel }}
+          DISPATCH_PUBLISH: ${{ github.event.client_payload.publish }}
+          DISPATCH_GITHUB_RELEASE: ${{ github.event.client_payload.github_release }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_GITHUB_RELEASE: ${{ inputs.github_release }}
+        run: |
+          set -euo pipefail
+
+          pick() { # dispatch payload first, then workflow input, then default
+            local payload="$1" input="$2" fallback="$3"
+            if [[ -n "$payload" ]]; then printf '%s' "$payload";
+            elif [[ -n "$input" ]]; then printf '%s' "$input";
+            else printf '%s' "$fallback"; fi
+          }
+
+          source_ref="$(pick "$DISPATCH_SOURCE_REF" "$INPUT_SOURCE_REF" dev)"
+          version="$(pick "$DISPATCH_VERSION" "$INPUT_VERSION" "")"
+          release_tag="$(pick "$DISPATCH_RELEASE_TAG" "$INPUT_RELEASE_TAG" "")"
+          channel="$(pick "$DISPATCH_CHANNEL" "$INPUT_CHANNEL" "")"
+          publish="$(pick "$DISPATCH_PUBLISH" "$INPUT_PUBLISH" true)"
+          github_release="$(pick "$DISPATCH_GITHUB_RELEASE" "$INPUT_GITHUB_RELEASE" false)"
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/bots/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+          if [[ -z "$channel" ]]; then
+            if [[ "$version" == *-* ]]; then channel=alpha; else channel=latest; fi
+          fi
+          [[ "$channel" == "latest" || "$channel" == "alpha" ]] || {
+            echo "invalid channel: $channel (latest|alpha)"
+            exit 1
+          }
+          if [[ -z "$release_tag" ]]; then
+            release_tag="computer-v${version}"
+          fi
+          [[ "$release_tag" =~ ^computer-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: $release_tag"
+            exit 1
+          }
+          case "$publish" in true|1|yes) publish=true ;; *) publish=false ;; esac
+          case "$github_release" in true|1|yes) github_release=true ;; *) github_release=false ;; esac
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+            echo "release_tag=$release_tag"
+            echo "channel=$channel"
+            echo "publish=$publish"
+            echo "github_release=$github_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          GITHUB_RELEASE: ${{ steps.payload.outputs.github_release }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in CNB_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ "$GITHUB_RELEASE" == "true" && -z "${RELEASE_TOKEN:-}" ]]; then
+            missing+=("CODEBAY_RELEASE_WRITE_TOKEN")
+          fi
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$(
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve zbot source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Host toolchain limits per target:
+          #  - linux-arm64 on an x64 runner: GNU strip cannot read aarch64 ELF → strip off.
+          #  - win32 on windows-2025: official node.zip needs Windows' bsdtar
+          #    (hostTarCommand); strip is skipped internally, signtool is optional.
+          #  - darwin needs real codesign → macOS runner only; Apple's strip
+          #    handles the x86_64 slice from the arm64 host.
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x64
+            strip: "1"
+          - runner: ubuntu-latest
+            platform: linux
+            arch: arm64
+            strip: "0"
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+            strip: "1"
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            strip: "1"
+          - runner: macos-15
+            platform: darwin
+            arch: x64
+            strip: "1"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch zbot source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          package_version="$(node -p "require('$build_root/packages/computer/package.json').version")"
+          if [[ "$RELEASE_VERSION" != "$package_version" && ! "$RELEASE_VERSION" =~ ^${package_version//./\\.}-rc\.[0-9]+$ ]]; then
+            echo "workflow version $RELEASE_VERSION does not match packages/computer version $package_version"
+            echo "(rc builds carry the base package version: computer-v${package_version}-rc.N)"
+            exit 1
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          corepack enable pnpm
+          pnpm install --frozen-lockfile --filter "@botiverse/raft-computer..."
+
+      - name: Build workspace dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          pnpm --filter @botiverse/raft-computer run build:deps
+
+      - name: Build SEA binary
+        shell: bash
+        env:
+          RAFT_NODE_STRIP: ${{ matrix.strip }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          node packages/computer/scripts/native/build.mjs \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "$RELEASE_VERSION" \
+            --node-version "$NODE_VERSION" \
+            --out-dir "$RUNNER_TEMP/zeno-sea-out"
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${{ runner.temp }}/zeno-sea-stage"
+          mkdir -p "$stage"
+          cp "$RUNNER_TEMP/zeno-sea-out"/zeno-computer-* "$stage/"
+          cp "$RUNNER_TEMP/zeno-sea-out"/photon_rs_bg.wasm* "$stage/"
+          ls -l "$stage"
+          echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
+
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeno-sea-${{ matrix.platform }}-${{ matrix.arch }}
+          path: ${{ env.STAGE_DIR }}
+          if-no-files-found: error
+
+  package:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+    steps:
+      - name: Fetch zbot source at exact SHA
+        # prepare-zeno-release.mjs + install.sh/install.ps1 ship from the same
+        # source commit as the built binaries.
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "${{ needs.resolve.outputs.source_sha }}"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "${{ needs.resolve.outputs.source_sha }}" ]]
+
+      - name: Download all target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zeno-sea-*
+          path: ${{ runner.temp }}/zeno-bins
+          merge-multiple: true
+
+      - name: Fetch the published versions index
+        # versions.json accumulates entries across releases; a 404 just means
+        # this is the first publish.
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="${{ runner.temp }}/versions.existing.json"
+          if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/versions.json" -o "$existing" 2>/dev/null; then
+            echo "EXISTING_VERSIONS=$existing" >> "$GITHUB_ENV"
+          else
+            echo "no published versions.json yet (first release)"
+            touch "${{ runner.temp }}/versions.existing.empty"
+          fi
+
+      - name: Assemble the release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          extra=()
+          if [[ -n "${EXISTING_VERSIONS:-}" ]]; then
+            extra+=(--versions-file "$EXISTING_VERSIONS")
+          fi
+          node "$build_root/scripts/prepare-zeno-release.mjs" \
+            --bin-dir "${{ runner.temp }}/zeno-bins" \
+            --out-dir "$release_dir" \
+            --version "$RELEASE_VERSION" \
+            --channel "$RELEASE_CHANNEL" \
+            --node-version "$NODE_VERSION" \
+            --required-targets linux-x64,linux-arm64,win32-x64,darwin-arm64,darwin-x64 \
+            --repo "$SOURCE_REPO" \
+            --source-sha "${{ needs.resolve.outputs.source_sha }}" \
+            "${extra[@]}"
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+          find "$release_dir" -type f | sort
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeno-release-${{ needs.resolve.outputs.version }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error
+
+  publish-r2:
+    needs: [resolve, package]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release tree
+        uses: actions/download-artifact@v4
+        with:
+          name: zeno-release-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/zeno-release
+
+      - name: Upload to Cloudflare R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/zeno-release"
+          version="${{ needs.resolve.outputs.version }}"
+
+          content_type() {
+            case "$1" in
+              *.json)    printf 'application/json' ;;
+              *.wasm)    printf 'application/wasm' ;;
+              *.sh)      printf 'text/x-shellscript' ;;
+              *.ps1)     printf 'text/plain; charset=utf-8' ;;
+              *.gz)      printf 'application/gzip' ;;
+              *.txt|*.sha256|*SHA256SUMS) printf 'text/plain' ;;
+              *)         printf 'application/octet-stream' ;;
+            esac
+          }
+
+          # Versioned bytes are immutable; only the channel pointers, the
+          # rolling versions index, and the installers get fresh/no-cache TTLs.
+          cache_control() {
+            case "$1" in
+              manifest.json|alpha/manifest.json|versions.json)
+                printf 'no-cache, must-revalidate' ;;
+              install.sh|install.ps1)
+                printf 'public, max-age=3600' ;;
+              *)
+                printf 'public, max-age=31536000, immutable' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/ (version $version)"
+          while IFS= read -r -d '' file; do
+            key="${file#$release_dir/}"
+            ct="$(content_type "$key")"
+            cc="$(cache_control "$key")"
+            printf '  put %s/%s (%s | %s)\n' "$R2_PREFIX" "$key" "$ct" "$cc"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" --cache-control "$cc" >/dev/null
+          done < <(find "$release_dir" -type f -print0)
+
+          echo "Done. Published under $PUBLIC_BASE_URL/"
+
+  publish-github:
+    needs: [resolve, package]
+    if: needs.resolve.outputs.publish == 'true' && needs.resolve.outputs.github_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          set -euo pipefail
+          type -P gh >/dev/null || {
+            curl -fsSL https://github.com/cli/cli/releases/download/v2.82.0/gh_2.82.0_linux_amd64.tar.gz \
+              | tar -xz -C /tmp gh_2.82.0_linux_amd64/bin/gh
+            echo "/tmp/gh_2.82.0_linux_amd64/bin" >> "$GITHUB_PATH"
+          }
+
+      - name: Download release tree
+        uses: actions/download-artifact@v4
+        with:
+          name: zeno-release-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/zeno-release
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_dir="${{ runner.temp }}/zeno-release/${RELEASE_VERSION}"
+
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          ## Zeno Computer v${RELEASE_VERSION}
+
+          Self-contained single-file CLI (SEA): Linux x64/arm64, macOS arm64/x64, Windows x64.
+
+          ### Install
+
+          **macOS / Linux:**
+          \`\`\`bash
+          curl -fsSL https://releases.73zls.com/zeno/install.sh | sh
+          \`\`\`
+
+          **Windows (PowerShell):**
+          \`\`\`powershell
+          irm https://releases.73zls.com/zeno/install.ps1 | iex
+          \`\`\`
+
+          Verify downloads with the attached \`SHA256SUMS\` / per-file \`.sha256\` sidecars.
+          EOF
+
+          gh api "repos/${RELEASE_REPO}" >/dev/null
+          prerelease_args=()
+          if [[ "$RELEASE_CHANNEL" == "alpha" ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; updating assets."
+            gh release edit "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
+              --title "Zeno Computer ${RELEASE_VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
+              --title "Zeno Computer ${RELEASE_VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              "${prerelease_args[@]}"
+          fi
+
+          mapfile -t assets < <(find "$version_dir" -maxdepth 1 -type f | sort)
+          [[ "${#assets[@]}" -gt 0 ]] || {
+            echo "no release assets found in $version_dir"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" --clobber
+
+          echo "Released: https://github.com/$RELEASE_REPO/releases/tag/$RELEASE_TAG"
