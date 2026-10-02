@@ -1,0 +1,529 @@
+name: Build Zeno Server Release
+
+# zeno-server SEA release pipeline: fetches zls_nmtx/sohaha/bots at an exact
+# SHA, builds the web dist once, then one single-executable binary per
+# (platform, arch) via packages/server/scripts/native/build.mjs, assembles the
+# R2 release tree with scripts/prepare-zeno-release.mjs (--app-id zeno-server),
+# and publishes to https://releases.73zls.com/zeno/server (bucket `releases`,
+# prefix `zeno/server/`):
+#
+#   zeno/server/manifest.json            latest pointer {"name","version"}
+#   zeno/server/alpha/manifest.json      alpha pointer for rc builds
+#   zeno/server/versions.json            release index (retain-pruned)
+#   zeno/server/<version>/manifest.json  per-version target manifest
+#   zeno/server/<version>/<file>         binaries + .sha256 / SHA256SUMS
+#   zeno/server/install.sh, install.ps1  bucket-root installers
+#
+# Retention: keeps only the N most recently PUBLISHED versions per channel
+# (default 2; recency by published_at). The prune step in publish-r2 deletes
+# the object trees of dropped versions.
+#
+# Trigger: `mise run nmtx:ci -- --workflow zeno-server.yml --version X.Y.Z`
+# (scripts/mise/nmtx-ci.sh) or workflow_dispatch.
+
+on:
+  repository_dispatch:
+    types: [build-zeno-server-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: dev
+        description: zbot (bots) branch, tag, bare 40-char SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.0.1 or 0.0.1-rc.1.
+      channel:
+        required: false
+        type: string
+        description: "Release channel: latest or alpha. Empty = alpha when the version is a prerelease, else latest."
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Upload the release tree to R2 (disable for a build-only smoke run).
+      retain:
+        required: false
+        type: string
+        default: "2"
+        description: "Bucket retention: keep the N most recently published versions per channel."
+      github_release:
+        required: false
+        type: boolean
+        default: false
+        description: Accepted for payload compatibility; currently unused (no GH release leg).
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/bots
+  SOURCE_REPO: zls_nmtx/sohaha/bots
+  PUBLIC_BASE_URL: https://releases.73zls.com/zeno/server
+  R2_BUCKET: releases
+  R2_PREFIX: zeno/server
+  # Host node major must equal the SEA carrier major (build.mjs asserts it).
+  NODE_VERSION: "24.15.0"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      channel: ${{ steps.payload.outputs.channel }}
+      publish: ${{ steps.payload.outputs.publish }}
+      retain: ${{ steps.payload.outputs.retain }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_CHANNEL: ${{ github.event.client_payload.channel }}
+          DISPATCH_PUBLISH: ${{ github.event.client_payload.publish }}
+          DISPATCH_RETAIN: ${{ github.event.client_payload.retain }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_RETAIN: ${{ inputs.retain }}
+        run: |
+          set -euo pipefail
+
+          pick() {
+            local payload="$1" input="$2" fallback="$3"
+            if [[ -n "$payload" ]]; then printf '%s' "$payload";
+            elif [[ -n "$input" ]]; then printf '%s' "$input";
+            else printf '%s' "$fallback"; fi
+          }
+
+          source_ref="$(pick "$DISPATCH_SOURCE_REF" "$INPUT_SOURCE_REF" dev)"
+          version="$(pick "$DISPATCH_VERSION" "$INPUT_VERSION" "")"
+          channel="$(pick "$DISPATCH_CHANNEL" "$INPUT_CHANNEL" "")"
+          publish="$(pick "$DISPATCH_PUBLISH" "$INPUT_PUBLISH" true)"
+          retain="$(pick "$DISPATCH_RETAIN" "$INPUT_RETAIN" 2)"
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/bots/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || { echo "unsupported source ref: $source_ref"; exit 1; }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { echo "invalid version: $version"; exit 1; }
+          if [[ -z "$channel" ]]; then
+            if [[ "$version" == *-* ]]; then channel=alpha; else channel=latest; fi
+          fi
+          [[ "$channel" == "latest" || "$channel" == "alpha" ]] || { echo "invalid channel: $channel"; exit 1; }
+          case "$publish" in true|1|yes) publish=true ;; *) publish=false ;; esac
+          [[ "$retain" =~ ^[0-9]+$ ]] || { echo "invalid retain: $retain"; exit 1; }
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "publish=$publish"
+            echo "retain=$retain"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in CNB_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$(
+              git "${auth_args[@]}" ls-remote "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" "refs/tags/$SOURCE_REF" "refs/heads/$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "unable to resolve zbot source ref: $SOURCE_REF"; exit 1; }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  # The embedded web UI is identical across platforms — build once, share via
+  # artifact so each native leg only needs server deps.
+  web:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+    steps:
+      - name: Fetch zbot source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          corepack enable pnpm
+          pnpm install --frozen-lockfile --filter "@botiverse/raft-web..."
+
+      - name: Build web dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          pnpm --filter @botiverse/raft-web run build
+
+      - name: Upload web dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeno-web-dist
+          path: ${{ github.workspace }}/build-src/packages/web/dist
+          if-no-files-found: error
+
+  build:
+    needs: [resolve, web]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each leg builds for the runner's own platform/arch — the external
+          # node_modules closure (argon2/sharp/pglite wasm) must match the
+          # target, so cross-compiling legs are intentionally absent.
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+          - runner: macos-13
+            platform: darwin
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch zbot source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          corepack enable pnpm
+          # server + its deps (gives the closure walker real packages); web is
+          # NOT needed here — the dist arrives as an artifact.
+          pnpm install --frozen-lockfile --filter "@botiverse/raft-server..."
+
+      - name: Download web dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: zeno-web-dist
+          path: ${{ github.workspace }}/build-src/packages/web/dist
+
+      - name: Build SEA binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          node packages/server/scripts/native/build.mjs \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "$RELEASE_VERSION" \
+            --node-version "$NODE_VERSION" \
+            --web-dist packages/web/dist \
+            --out-dir "$RUNNER_TEMP/zeno-sea-out"
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${{ runner.temp }}/zeno-sea-stage"
+          mkdir -p "$stage"
+          cp "$RUNNER_TEMP/zeno-sea-out"/zeno-server-* "$stage/"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeno-sea-${{ matrix.platform }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/zeno-sea-stage
+          if-no-files-found: error
+
+  package:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      RELEASE_RETAIN: ${{ needs.resolve.outputs.retain }}
+    steps:
+      - name: Fetch zbot source at exact SHA
+        # prepare-zeno-release.mjs + install.sh/install.ps1 ship from the same
+        # source commit as the built binaries.
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zeno-sea-*
+          path: ${{ runner.temp }}/zeno-bins
+          merge-multiple: true
+
+      - name: Fetch the published versions index
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="${{ runner.temp }}/versions.existing.json"
+          if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/versions.json" -o "$existing" 2>/dev/null; then
+            echo "EXISTING_VERSIONS=$existing" >> "$GITHUB_ENV"
+          else
+            echo "no published versions.json yet (first release)"
+          fi
+
+      - name: Assemble the release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          extra=()
+          if [[ -n "${EXISTING_VERSIONS:-}" ]]; then
+            extra+=(--versions-file "$EXISTING_VERSIONS")
+          fi
+          node "$build_root/scripts/prepare-zeno-release.mjs" \
+            --bin-dir "${{ runner.temp }}/zeno-bins" \
+            --out-dir "$release_dir" \
+            --version "$RELEASE_VERSION" \
+            --channel "$RELEASE_CHANNEL" \
+            --node-version "$NODE_VERSION" \
+            --required-targets linux-x64,linux-arm64,win32-x64,darwin-arm64,darwin-x64 \
+            --retain "$RELEASE_RETAIN" \
+            --app-id zeno-server \
+            --manifest-script packages/server/scripts/native/produce-manifest.mjs \
+            --installers packages/server/scripts/install.sh,packages/server/scripts/install.ps1 \
+            --repo "$SOURCE_REPO" \
+            --source-sha "${{ needs.resolve.outputs.source_sha }}" \
+            "${extra[@]}"
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+          find "$release_dir" -type f | sort
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeno-server-release-${{ needs.resolve.outputs.version }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error
+
+  publish-r2:
+    needs: [resolve, package]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release tree
+        uses: actions/download-artifact@v4
+        with:
+          name: zeno-server-release-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/zeno-release
+
+      - name: Snapshot the published versions index
+        # The prune step diffs this snapshot against the new index, so it must
+        # run BEFORE the upload below overwrites versions.json.
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="${{ runner.temp }}/versions.before.json"
+          if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/versions.json" -o "$existing" 2>/dev/null; then
+            echo "VERSIONS_BEFORE=$existing" >> "$GITHUB_ENV"
+          else
+            echo "no published versions.json yet (first release)"
+          fi
+
+      - name: Upload to Cloudflare R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/zeno-release"
+          version="${{ needs.resolve.outputs.version }}"
+
+          content_type() {
+            case "$1" in
+              *.json)    printf 'application/json' ;;
+              *.wasm)    printf 'application/wasm' ;;
+              *.sh)      printf 'text/x-shellscript' ;;
+              *.ps1)     printf 'text/plain; charset=utf-8' ;;
+              *.gz)      printf 'application/gzip' ;;
+              *.txt|*.sha256|*SHA256SUMS) printf 'text/plain' ;;
+              *)         printf 'application/octet-stream' ;;
+            esac
+          }
+
+          cache_control() {
+            case "$1" in
+              manifest.json|alpha/manifest.json|versions.json)
+                printf 'no-cache, must-revalidate' ;;
+              install.sh|install.ps1)
+                printf 'public, max-age=3600' ;;
+              *)
+                printf 'public, max-age=31536000, immutable' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/ (version $version)"
+          while IFS= read -r -d '' file; do
+            key="${file#$release_dir/}"
+            ct="$(content_type "$key")"
+            cc="$(cache_control "$key")"
+            printf '  put %s/%s (%s | %s)\n' "$R2_PREFIX" "$key" "$ct" "$cc"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" --cache-control "$cc" >/dev/null
+          done < <(find "$release_dir" -type f -print0)
+
+          echo "Done. Published under $PUBLIC_BASE_URL/"
+
+      - name: Prune versions beyond retention
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${VERSIONS_BEFORE:-}" ]] || { echo "no previous index; nothing to prune"; exit 0; }
+          new_index="${{ runner.temp }}/zeno-release/versions.json"
+
+          mapfile -t dropped < <(comm -23 \
+            <(jq -r '.versions[].version' "$VERSIONS_BEFORE" | sort -u) \
+            <(jq -r '.versions[].version' "$new_index" | sort -u))
+          [[ ${#dropped[@]} -gt 0 && -n "${dropped[0]}" ]] || { echo "no versions dropped from index; nothing to prune"; exit 0; }
+
+          delete_key() {
+            printf '  delete %s/%s\n' "$R2_PREFIX" "$1"
+            wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$1" --remote >/dev/null
+          }
+
+          for version in "${dropped[@]}"; do
+            echo "Pruning $version"
+            manifest="${{ runner.temp }}/manifest.$version.json"
+            if curl -fsSL --max-time 20 "$PUBLIC_BASE_URL/$version/manifest.json" -o "$manifest"; then
+              while IFS= read -r name; do
+                delete_key "$version/$name"
+                delete_key "$version/$name.sha256"
+              done < <(jq -r '[.targets[].file, .targets[].gz.file, .photonWasm.file] | flatten | map(select(. != null)) | unique | .[]' "$manifest")
+            else
+              echo "  manifest.json unreachable; deleting fixed keys only"
+            fi
+            delete_key "$version/SHA256SUMS"
+            delete_key "$version/provenance.txt"
+            delete_key "$version/manifest.json"
+          done
+          echo "Prune complete: ${#dropped[@]} version(s) removed"
