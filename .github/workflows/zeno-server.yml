@@ -220,14 +220,14 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           corepack enable pnpm
-          pnpm install --frozen-lockfile --filter "@botiverse/zeno-web..."
+          pnpm install --frozen-lockfile --filter "@botiverse/raft-web..."
 
       - name: Build web dist
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          pnpm --filter @botiverse/zeno-web run build
+          pnpm --filter @botiverse/raft-web run build
 
       - name: Upload web dist artifact
         uses: actions/upload-artifact@v4
@@ -305,7 +305,7 @@ jobs:
           corepack enable pnpm
           # server + its deps (gives the closure walker real packages); web is
           # NOT needed here — the dist arrives as an artifact.
-          pnpm install --frozen-lockfile --filter "@botiverse/zeno-server..."
+          pnpm install --frozen-lockfile --filter "@botiverse/raft-server..."
 
       - name: Install cross-arch runtime deps
         if: matrix.cross == '1'
