@@ -2,9 +2,10 @@ name: Build Zeno Server Release
 
 # zeno-server SEA release pipeline: fetches zls_nmtx/sohaha/bots at an exact
 # SHA, builds the web dist once, then one single-executable binary per
-# (platform, arch) via packages/server/scripts/native/build.mjs, assembles the
-# R2 release tree with scripts/prepare-zeno-release.mjs (--app-id zeno-server),
-# and publishes to https://releases.73zls.com/zeno/server (bucket `releases`,
+# (platform, arch). Every repo-internal step (pnpm filters, native build,
+# staging, release-tree assembly) goes through scripts/release-ci.mjs inside
+# the fetched source, so package renames and path moves can never drift from
+# CI. Publishes to https://releases.73zls.com/zeno/server (bucket `releases`,
 # prefix `zeno/server/`):
 #
 #   zeno/server/manifest.json            latest pointer {"name","version"}
@@ -214,26 +215,31 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # All repo-internal wiring (pnpm filters, package names, dist paths)
+      # goes through scripts/release-ci.mjs inside the fetched source — it is
+      # versioned with the code being built, so renames can never drift.
       - name: Install workspace dependencies
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           corepack enable pnpm
-          pnpm install --frozen-lockfile --filter "@botiverse/raft-web..."
+          node scripts/release-ci.mjs server web-install
 
       - name: Build web dist
+        id: web
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          pnpm --filter @botiverse/raft-web run build
+          node scripts/release-ci.mjs server web-build
+          echo "dist_dir=$(node scripts/release-ci.mjs server web-dist-path)" >> "$GITHUB_OUTPUT"
 
       - name: Upload web dist artifact
         uses: actions/upload-artifact@v4
         with:
           name: zeno-web-dist
-          path: ${{ github.workspace }}/build-src/packages/web/dist
+          path: ${{ github.workspace }}/build-src/${{ steps.web.outputs.dist_dir }}
           if-no-files-found: error
 
   build:
@@ -305,42 +311,28 @@ jobs:
           corepack enable pnpm
           # server + its deps (gives the closure walker real packages); web is
           # NOT needed here — the dist arrives as an artifact.
-          pnpm install --frozen-lockfile --filter "@botiverse/raft-server..."
+          node scripts/release-ci.mjs server install
 
       - name: Install cross-arch runtime deps
         if: matrix.cross == '1'
         shell: bash
         run: |
           set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
+          cd "${GITHUB_WORKSPACE}/build-src"
           scratch="${RUNNER_TEMP}/zeno-runtime-modules"
-          mkdir -p "$scratch"
-          # Pin the runtime externals to the exact versions the workspace
-          # lockfile resolved — read them from the already-installed packages.
-          cd "$build_root"
-          SCRATCH="$scratch" node -e '
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const pkgs = JSON.parse(fs.readFileSync("packages/server/scripts/native/external-packages.json", "utf8"));
-            const deps = {};
-            for (const p of pkgs) {
-              deps[p] = JSON.parse(fs.readFileSync(path.join("packages/server/node_modules", p, "package.json"), "utf8")).version;
-            }
-            fs.writeFileSync(path.join(process.env.SCRATCH, "package.json"),
-              JSON.stringify({ name: "zeno-runtime-deps", private: true, version: "0.0.0", dependencies: deps }, null, 2));
-          '
-          # npm --cpu/--os selects the matching platform variants for optional
-          # native deps (e.g. @img/sharp-darwin-x64); flat layout is exactly
-          # what the payload's node_modules needs.
-          cd "$scratch"
-          npm install --cpu="${{ matrix.arch }}" --os="${{ matrix.platform }}" --omit=dev --no-audit --no-fund
+          # npm --cpu/--os inside release-ci selects the matching platform
+          # variants for optional native deps (e.g. @img/sharp-darwin-x64).
+          node scripts/release-ci.mjs server runtime-deps \
+            --scratch "$scratch" \
+            --cpu "${{ matrix.arch }}" \
+            --os "${{ matrix.platform }}"
           echo "RUNTIME_MODULES_ROOT=$scratch" >> "$GITHUB_ENV"
 
       - name: Download web dist artifact
         uses: actions/download-artifact@v4
         with:
           name: zeno-web-dist
-          path: ${{ github.workspace }}/build-src/packages/web/dist
+          path: ${{ runner.temp }}/zeno-web-dist
 
       - name: Build SEA binary
         shell: bash
@@ -351,12 +343,12 @@ jobs:
           if [[ -n "${RUNTIME_MODULES_ROOT:-}" ]]; then
             extra+=(--runtime-modules-root "$RUNTIME_MODULES_ROOT")
           fi
-          node packages/server/scripts/native/build.mjs \
+          node scripts/release-ci.mjs server sea \
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "$RELEASE_VERSION" \
             --node-version "$NODE_VERSION" \
-            --web-dist packages/web/dist \
+            --web-dist "${{ runner.temp }}/zeno-web-dist" \
             --out-dir "$RUNNER_TEMP/zeno-sea-out" \
             ${extra[@]+"${extra[@]}"}
 
@@ -364,9 +356,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
           stage="${{ runner.temp }}/zeno-sea-stage"
-          mkdir -p "$stage"
-          cp "$RUNNER_TEMP/zeno-sea-out"/zeno-server-* "$stage/"
+          node scripts/release-ci.mjs server stage \
+            --from "$RUNNER_TEMP/zeno-sea-out" \
+            --to "$stage"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -431,28 +425,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
           release_dir="${GITHUB_WORKSPACE}/release"
           extra=()
           if [[ -n "${EXISTING_VERSIONS:-}" ]]; then
             extra+=(--versions-file "$EXISTING_VERSIONS")
           fi
-          node "$build_root/scripts/prepare-zeno-release.mjs" \
+          node "${GITHUB_WORKSPACE}/build-src/scripts/release-ci.mjs" server package \
             --bin-dir "${{ runner.temp }}/zeno-bins" \
             --out-dir "$release_dir" \
             --version "$RELEASE_VERSION" \
             --channel "$RELEASE_CHANNEL" \
             --node-version "$NODE_VERSION" \
-            --required-targets linux-x64,linux-arm64,win32-x64,darwin-arm64,darwin-x64 \
             --retain "$RELEASE_RETAIN" \
-            --app-id zeno-server \
-            --manifest-script "$build_root/packages/server/scripts/native/produce-manifest.mjs" \
-            --installers packages/server/scripts/install.sh,packages/server/scripts/install.ps1 \
             --repo "$SOURCE_REPO" \
             --source-sha "${{ needs.resolve.outputs.source_sha }}" \
             "${extra[@]}"
           echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
-          find "$release_dir" -type f | sort
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

@@ -1,10 +1,12 @@
 name: Build Zeno Computer Release
 
 # zeno-computer SEA release pipeline: fetches zls_nmtx/sohaha/bots at an exact
-# SHA, builds one single-executable binary per (platform, arch) via
-# packages/computer/scripts/native/build.mjs, assembles the R2 release tree
-# with scripts/prepare-zeno-release.mjs, and publishes to
-# https://releases.73zls.com/zeno (bucket `releases`, prefix `zeno/`):
+# SHA, builds one single-executable binary per (platform, arch), assembles the
+# R2 release tree, and publishes to https://releases.73zls.com/zeno (bucket
+# `releases`, prefix `zeno/`). Every repo-internal step (version check, pnpm
+# filters, native build, staging, release-tree assembly) goes through
+# scripts/release-ci.mjs inside the fetched source, so package renames and
+# path moves can never drift from CI:
 #
 #   zeno/manifest.json            latest pointer {"name","version"} (no-cache)
 #   zeno/alpha/manifest.json      alpha pointer for rc builds (no-cache)
@@ -294,9 +296,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
-          cd "$build_root"
-          package_version="$(node -p "require('./packages/computer/package.json').version")"
+          cd "${GITHUB_WORKSPACE}/build-src"
+          package_version="$(node scripts/release-ci.mjs computer version)"
           if [[ "$RELEASE_VERSION" != "$package_version" && ! "$RELEASE_VERSION" =~ ^${package_version//./\\.}-rc\.[0-9]+$ ]]; then
             echo "workflow version $RELEASE_VERSION does not match packages/computer version $package_version"
             echo "(rc builds carry the base package version: computer-v${package_version}-rc.N)"
@@ -314,37 +315,37 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           corepack enable pnpm
-          pnpm install --frozen-lockfile --filter "@botiverse/raft-computer..."
+          node scripts/release-ci.mjs computer install
 
       - name: Build workspace dependencies
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          pnpm --filter @botiverse/raft-computer run build:deps
+          node scripts/release-ci.mjs computer deps-build
 
       - name: Build SEA binary
         shell: bash
-        env:
-          RAFT_NODE_STRIP: ${{ matrix.strip }}
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          node packages/computer/scripts/native/build.mjs \
+          node scripts/release-ci.mjs computer sea \
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "$RELEASE_VERSION" \
             --node-version "$NODE_VERSION" \
+            --strip "${{ matrix.strip }}" \
             --out-dir "$RUNNER_TEMP/zeno-sea-out"
 
       - name: Stage release files
         shell: bash
         run: |
           set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
           stage="${{ runner.temp }}/zeno-sea-stage"
-          mkdir -p "$stage"
-          cp "$RUNNER_TEMP/zeno-sea-out"/zeno-computer-* "$stage/"
-          cp "$RUNNER_TEMP/zeno-sea-out"/photon_rs_bg.wasm* "$stage/"
+          node scripts/release-ci.mjs computer stage \
+            --from "$RUNNER_TEMP/zeno-sea-out" \
+            --to "$stage"
           ls -l "$stage"
           echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
 
@@ -409,25 +410,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          build_root="${GITHUB_WORKSPACE}/build-src"
           release_dir="${GITHUB_WORKSPACE}/release"
           extra=()
           if [[ -n "${EXISTING_VERSIONS:-}" ]]; then
             extra+=(--versions-file "$EXISTING_VERSIONS")
           fi
-          node "$build_root/scripts/prepare-zeno-release.mjs" \
+          node "${GITHUB_WORKSPACE}/build-src/scripts/release-ci.mjs" computer package \
             --bin-dir "${{ runner.temp }}/zeno-bins" \
             --out-dir "$release_dir" \
             --version "$RELEASE_VERSION" \
             --channel "$RELEASE_CHANNEL" \
             --node-version "$NODE_VERSION" \
-            --required-targets linux-x64,linux-arm64,win32-x64,darwin-arm64,darwin-x64 \
             --retain "$RELEASE_RETAIN" \
             --repo "$SOURCE_REPO" \
             --source-sha "${{ needs.resolve.outputs.source_sha }}" \
             "${extra[@]}"
           echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
-          find "$release_dir" -type f | sort
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
