@@ -56,11 +56,42 @@ on:
         default: false
         description: Accepted for payload compatibility; currently unused (no GH release leg).
 
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        description: zbot (bots) branch, tag, bare 40-char SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.0.1 or 0.0.1-rc.1.
+      channel:
+        required: false
+        type: string
+        description: "Release channel: latest or alpha. Empty = alpha when the version is a prerelease, else latest."
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Upload the release tree to R2 (disable for a build-only smoke run).
+      retain:
+        required: false
+        type: string
+        default: "2"
+        description: "Bucket retention: keep the N most recently published versions per channel."
+      github_release:
+        required: false
+        type: boolean
+        default: false
+        description: Accepted for payload compatibility; currently unused (no GH release leg).
+
 permissions:
   contents: read
 
+# Keep product groups distinct: reusable workflows inherit the caller workflow name.
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  group: zeno-server-${{ inputs.version || github.event.client_payload.version || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -365,7 +396,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeno-sea-${{ matrix.platform }}-${{ matrix.arch }}
+          name: zeno-server-sea-${{ matrix.platform }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/zeno-sea-stage
           if-no-files-found: error
 
@@ -406,7 +437,7 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: zeno-sea-*
+          pattern: zeno-server-sea-*
           path: ${{ runner.temp }}/zeno-bins
           merge-multiple: true
 

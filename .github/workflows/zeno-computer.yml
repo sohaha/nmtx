@@ -19,7 +19,8 @@ name: Build Zeno Computer Release
 # per channel (--retain 2; recency by published_at, not semver). The prune
 # step in publish-r2 deletes the object trees of dropped versions.
 #
-# Trigger from the source repo: `mise run nmtx:ci` (scripts/mise/nmtx-ci.sh)
+# Called by zeno-release.yml for combined server + computer releases.
+# Standalone: `mise run nmtx:ci -- --workflow zeno-computer.yml`
 # or a repository_dispatch with type `build-zeno-computer-release`.
 
 on:
@@ -60,11 +61,46 @@ on:
         default: "2"
         description: "Bucket retention: keep the N most recently published versions per channel. Use 1 once to wipe older lines."
 
+  workflow_call:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        description: zbot (bots) branch, tag, bare 40-char SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.0.1 or 0.0.1-rc.1.
+      release_tag:
+        required: false
+        type: string
+        description: Optional GitHub release tag. Defaults to computer-v<version>.
+      channel:
+        required: false
+        type: string
+        description: "Release channel: latest or alpha. Empty = alpha when the version is a prerelease, else latest."
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Upload the release tree to R2 (disable for a build-only smoke run).
+      github_release:
+        required: false
+        type: boolean
+        default: false
+        description: Also create/update a GitHub release on RELEASE_REPO (requires the repo to exist).
+      retain:
+        required: false
+        type: string
+        default: "2"
+        description: "Bucket retention: keep the N most recently published versions per channel. Use 1 once to wipe older lines."
+
 permissions:
   contents: read
 
+# Keep product groups distinct: reusable workflows inherit the caller workflow name.
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  group: zeno-computer-${{ inputs.version || github.event.client_payload.version || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -352,7 +388,7 @@ jobs:
       - name: Upload target artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeno-sea-${{ matrix.platform }}-${{ matrix.arch }}
+          name: zeno-computer-sea-${{ matrix.platform }}-${{ matrix.arch }}
           path: ${{ env.STAGE_DIR }}
           if-no-files-found: error
 
@@ -388,7 +424,7 @@ jobs:
       - name: Download all target artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: zeno-sea-*
+          pattern: zeno-computer-sea-*
           path: ${{ runner.temp }}/zeno-bins
           merge-multiple: true
 

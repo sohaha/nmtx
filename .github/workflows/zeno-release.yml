@@ -1,0 +1,87 @@
+name: Build Zeno Release
+
+# One run builds and publishes both products from the same immutable source.
+# Publishing is independent per product, not an atomic cross-product release.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: dev
+        description: zbot branch, tag, 40-char SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Shared server/computer release version, for example 0.0.1.
+      channel:
+        required: false
+        type: string
+        description: "latest or alpha. Empty = inferred from version."
+      publish:
+        required: false
+        type: boolean
+        default: true
+        description: Upload both release trees to R2.
+      retain:
+        required: false
+        type: string
+        default: "2"
+        description: Versions retained per product and channel.
+      github_release:
+        required: false
+        type: boolean
+        default: false
+        description: Also create/update the computer GitHub release (server ignores this).
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zeno-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Pin shared source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          source_sha="$(bash scripts/zeno-resolve-source.sh)"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  server:
+    needs: resolve
+    uses: ./.github/workflows/zeno-server.yml
+    secrets: inherit
+    with:
+      source_ref: ${{ needs.resolve.outputs.source_sha }}
+      version: ${{ inputs.version }}
+      channel: ${{ inputs.channel }}
+      publish: ${{ inputs.publish }}
+      retain: ${{ inputs.retain }}
+      github_release: ${{ inputs.github_release }}
+
+  computer:
+    needs: resolve
+    uses: ./.github/workflows/zeno-computer.yml
+    secrets: inherit
+    with:
+      source_ref: ${{ needs.resolve.outputs.source_sha }}
+      version: ${{ inputs.version }}
+      channel: ${{ inputs.channel }}
+      publish: ${{ inputs.publish }}
+      retain: ${{ inputs.retain }}
+      github_release: ${{ inputs.github_release }}
