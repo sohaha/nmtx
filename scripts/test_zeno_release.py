@@ -4,6 +4,7 @@ Requires PyYAML (python3 -m pip install PyYAML).
 """
 
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -36,6 +37,24 @@ class ReleaseContracts(unittest.TestCase):
             for key in ("version", "channel", "publish", "retain", "github_release"):
                 self.assertEqual(job["with"][key], "${{ inputs." + key + " }}")
         self.assertEqual(release["permissions"], {"contents": "read"})
+
+    def test_readme_upload_is_markdown_and_revalidated(self):
+        for product in ("server", "computer"):
+            steps = workflow(f"zeno-{product}.yml")["jobs"]["publish-r2"]["steps"]
+            upload = next(step["run"] for step in steps if step.get("name") == "Upload to Cloudflare R2")
+            # Execute only the pure header functions, never the actual upload.
+            functions = "\n".join(re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", upload).group()
+                                  for name in ("content_type", "cache_control"))
+            for path, mime, cache in (
+                ("README.md", "text/markdown; charset=utf-8", "no-cache, must-revalidate"),
+                ("install.sh", "text/x-shellscript", "public, max-age=3600"),
+                ("manifest.json", "application/json", "no-cache, must-revalidate"),
+                ("0.0.1/binary", "application/octet-stream", "public, max-age=31536000, immutable"),
+            ):
+                with self.subTest(product=product, path=path):
+                    result = subprocess.run(["bash", "-c", functions + '\ncontent_type "$1"; echo; cache_control "$1"',
+                                             "headers", path], capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout, mime + "\n" + cache)
 
     def test_standalone_inputs_are_also_callable(self):
         for product in ("server", "computer"):

@@ -14,6 +14,7 @@ name: Build Zeno Server Release
 #   zeno/server/<version>/manifest.json  per-version target manifest
 #   zeno/server/<version>/<file>         binaries + .sha256 / SHA256SUMS
 #   zeno/server/install.sh, install.ps1  bucket-root installers
+#   zeno/server/README.md                installation and operation guide
 #
 # Retention: keeps only the N most recently PUBLISHED versions per channel
 # (default 2; recency by published_at). The prune step in publish-r2 deletes
@@ -524,6 +525,7 @@ jobs:
               *.wasm)    printf 'application/wasm' ;;
               *.sh)      printf 'text/x-shellscript' ;;
               *.ps1)     printf 'text/plain; charset=utf-8' ;;
+              *.md)      printf 'text/markdown; charset=utf-8' ;;
               *.gz)      printf 'application/gzip' ;;
               *.txt|*.sha256|*SHA256SUMS) printf 'text/plain' ;;
               *)         printf 'application/octet-stream' ;;
@@ -532,7 +534,7 @@ jobs:
 
           cache_control() {
             case "$1" in
-              manifest.json|alpha/manifest.json|versions.json)
+              manifest.json|alpha/manifest.json|versions.json|README.md)
                 printf 'no-cache, must-revalidate' ;;
               install.sh|install.ps1)
                 printf 'public, max-age=3600' ;;

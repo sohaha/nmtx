@@ -14,6 +14,7 @@ name: Build Zeno Computer Release
 #   zeno/<version>/manifest.json  per-version target manifest
 #   zeno/<version>/<file>         binaries + .sha256 / .gz / wasm / SHA256SUMS
 #   zeno/install.sh, install.ps1  bucket-root installers
+#   zeno/README.md                installation and operation guide
 #
 # Retention: the bucket keeps only the two most recently PUBLISHED versions
 # per channel (--retain 2; recency by published_at, not semver). The prune
@@ -514,6 +515,7 @@ jobs:
               *.wasm)    printf 'application/wasm' ;;
               *.sh)      printf 'text/x-shellscript' ;;
               *.ps1)     printf 'text/plain; charset=utf-8' ;;
+              *.md)      printf 'text/markdown; charset=utf-8' ;;
               *.gz)      printf 'application/gzip' ;;
               *.txt|*.sha256|*SHA256SUMS) printf 'text/plain' ;;
               *)         printf 'application/octet-stream' ;;
@@ -521,10 +523,10 @@ jobs:
           }
 
           # Versioned bytes are immutable; only the channel pointers, the
-          # rolling versions index, and the installers get fresh/no-cache TTLs.
+          # rolling versions index, README, and installers get fresh/no-cache TTLs.
           cache_control() {
             case "$1" in
-              manifest.json|alpha/manifest.json|versions.json)
+              manifest.json|alpha/manifest.json|versions.json|README.md)
                 printf 'no-cache, must-revalidate' ;;
               install.sh|install.ps1)
                 printf 'public, max-age=3600' ;;

@@ -46,6 +46,24 @@ mise run nmtx:ci -- --workflow zeno-computer.yml --version 0.0.1
 以及仓库变量 `CLOUDFLARE_ACCOUNT_ID`。现有子流程仍会检查 Cloudflare 配置，
 因此 `--no-publish` 也需要现有配置。
 
+## R2 安装脚本与说明文档
+
+每次发布都会从同一源码提交复制两端 `install.sh`、`install.ps1` 与安装说明：
+
+| 产品 | 文档源码（zbot 仓库） | R2 README |
+| --- | --- | --- |
+| 服务端 | `packages/server/RELEASE_README.md` | <https://releases.73zls.com/zeno/server/README.md> |
+| 客户端 | `packages/computer/RELEASE_README.md` | <https://releases.73zls.com/zeno/README.md> |
+
+安装脚本位于对应 README 的同级目录。`scripts/release-ci.mjs` 通过 `--readme`
+传入产品说明，`scripts/prepare-zeno-release.mjs` 将其复制为发布树根目录的 `README.md`；
+缺失文档会使打包失败。上传使用 `text/markdown; charset=utf-8` 和
+`no-cache, must-revalidate`，不会把可变根文档标记为一年不可变缓存。
+源码提交记录在各自的 `<version>/provenance.txt`，不是发布根目录。
+
+注意：默认发布构建产物；仅 `--no-publish` 会跳过 R2。版本化产物采用 immutable 缓存，
+覆盖同一版本不是常规升级路径，边缘缓存或本地缓存可能仍保留旧字节；正常发布应递增版本。
+
 ## 同步与验证
 
 同步到 `github.com/sohaha/nmtx` 时需包含完整工作流和依赖：
