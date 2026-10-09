@@ -391,6 +391,7 @@ jobs:
       - name: Build release binary
         shell: pwsh
         run: |
+          Set-Location "$env:GITHUB_WORKSPACE/build-src"
           $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
           $extraArgs = "${{ matrix.cargo_args }}"
           if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
