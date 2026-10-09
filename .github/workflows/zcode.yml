@@ -1,0 +1,531 @@
+name: Build zcode Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  repository_dispatch:
+    types: [build-zcode-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: main
+        description: zcode branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.89.0 or 0.89.0-rc.1.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/zcode
+  RELEASE_PUBLIC_BASE_URL: https://releases.73zls.com/zcode
+  R2_BUCKET: releases
+  R2_PREFIX: zcode
+  ZCODE_CI: '1'
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PUSH_REF_NAME: ${{ github.ref_name }}
+          PUSH_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-main}"
+            version="${DISPATCH_VERSION:-}"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            [[ "$PUSH_REF_TYPE" == "tag" ]] || {
+              echo "unsupported push ref type: $PUSH_REF_TYPE"
+              exit 1
+            }
+            source_ref="$PUSH_REF_NAME"
+            version="${PUSH_REF_NAME#v}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+          fi
+
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zcode/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+
+          {
+            echo "source_ref=$source_ref"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$({
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF"
+            } | awk 'NR == 1 { print $1 }')"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve zcode source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 builds inside the manylinux2014 container (glibc 2.17
+          # baseline + vendored OpenSSL) via scripts/build_linux_compat.sh,
+          # matching the official GitHub release binary.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            compat_container: true
+          # aarch64 builds natively on the ARM runner with nightly + emulated
+          # TLS so the binary survives Termux kernels (see release.yml).
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            compat_container: false
+    runs-on: ${{ matrix.os }}
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch zcode source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Build portable Linux x86_64 in manylinux container
+        if: matrix.compat_container == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          scripts/build_linux_compat.sh dist-pkg
+        env:
+          ZCODE_RELEASE_BUILD: '1'
+          ZCODE_CI_BUILD: '1'
+          ZCODE_BUILD_SEMVER: v${{ needs.resolve.outputs.version }}
+          ZCODE_COMPAT_ARTIFACT: zcode
+
+      - name: Install Rust toolchain (aarch64 native)
+        if: matrix.compat_container == false
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+          components: rust-src
+
+      - name: Install build dependencies (aarch64 native)
+        if: matrix.compat_container == false
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang mold
+
+      - name: Build Linux aarch64 release binary
+        if: matrix.compat_container == false
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          mkdir -p .cargo
+          # Termux (Android) kernels implement ELF TLS Variant 1 while glibc
+          # expects Variant 2; build with emulated TLS (pthread_getspecific)
+          # so the aarch64 glibc binary does not panic there.
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Z", "tls-model=emulated"]
+          EOF
+          cargo +nightly build -Z build-std=std,panic_abort --release --target "$TARGET"
+          mkdir -p dist-pkg
+          cp "target/$TARGET/release/zcode" dist-pkg/zcode
+          chmod +x dist-pkg/zcode
+        env:
+          ZCODE_RELEASE_BUILD: '1'
+          ZCODE_CI_BUILD: '1'
+          ZCODE_BUILD_SEMVER: v${{ needs.resolve.outputs.version }}
+
+      - name: Verify built binary launches
+        shell: bash
+        run: "${GITHUB_WORKSPACE}/build-src/dist-pkg/zcode --version"
+
+      - name: Package ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/release-out"
+          cd "${GITHUB_WORKSPACE}/build-src/dist-pkg"
+          # compat 脚本还会生成同名 .tar.gz，发布 zip 只需要可执行文件和内置库
+          zip -q -r "${GITHUB_WORKSPACE}/release-out/zcode-v${RELEASE_VERSION}-${TARGET}.zip" . -x '*.tar.gz'
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.target == 'x86_64-unknown-linux-gnu' && 'x64' || 'arm64' }}
+          path: release-out/*.zip
+          if-no-files-found: error
+
+  build-macos:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch zcode source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          cargo build --release --target "$TARGET"
+          mkdir -p dist-pkg
+          cp "target/$TARGET/release/zcode" dist-pkg/zcode
+          chmod +x dist-pkg/zcode
+        env:
+          ZCODE_RELEASE_BUILD: '1'
+          ZCODE_CI_BUILD: '1'
+          ZCODE_BUILD_SEMVER: v${{ needs.resolve.outputs.version }}
+
+      - name: Verify built binary launches
+        shell: bash
+        run: "${GITHUB_WORKSPACE}/build-src/dist-pkg/zcode --version"
+
+      - name: Package ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/release-out"
+          cd "${GITHUB_WORKSPACE}/build-src/dist-pkg"
+          zip -q -r "${GITHUB_WORKSPACE}/release-out/zcode-v${RELEASE_VERSION}-${TARGET}.zip" .
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x64' }}
+          path: release-out/*.zip
+          if-no-files-found: error
+
+  build-windows:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            msvc_arch: amd64
+            cargo_args: ''
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            msvc_arch: amd64_arm64
+            cargo_args: '--no-default-features --features pdf'
+    runs-on: ${{ matrix.os }}
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - name: Fetch zcode source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Configure MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
+          $extraArgs = "${{ matrix.cargo_args }}"
+          if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
+            $cargoArgs += $extraArgs -split ' '
+          }
+          & cargo @cargoArgs
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+        env:
+          ZCODE_RELEASE_BUILD: '1'
+          ZCODE_CI_BUILD: '1'
+          ZCODE_BUILD_SEMVER: v${{ needs.resolve.outputs.version }}
+
+      - name: Verify built Windows binary launches
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/build-src/target/${{ matrix.target }}/release/zcode.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Built Windows binary failed to run --version"
+          }
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          $out = "zcode-v$env:RELEASE_VERSION-$env:TARGET.zip"
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/release-out" | Out-Null
+          Compress-Archive `
+            -Path "$env:GITHUB_WORKSPACE/build-src/target/${{ matrix.target }}/release/zcode.exe" `
+            -DestinationPath "$env:GITHUB_WORKSPACE/release-out/$out" -Force
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.target == 'x86_64-pc-windows-msvc' && 'x64' || 'arm64' }}
+          path: release-out/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout nmtx helpers
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -name '*.zip' | wc -l)
+          echo "Found $count release artifacts"
+          test "$count" -eq 6
+          find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Prepare R2 payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/prepare-zcode-release-assets.mjs \
+            "${RUNNER_TEMP}/release-assets" \
+            "${RUNNER_TEMP}/release-publish" \
+            "$VERSION" \
+            "$RELEASE_PUBLIC_BASE_URL"
+          # Ship the standalone install README + one-line installer alongside
+          # the binaries so https://releases.73zls.com/zcode/ is self-contained.
+          cp .github/release-assets/zcode/README.md "${RUNNER_TEMP}/release-publish/README.md"
+          cp .github/release-assets/zcode/install.sh "${RUNNER_TEMP}/release-publish/install.sh"
+          cat "${RUNNER_TEMP}/release-publish/latest.json"
+
+      - name: Upload latest release to R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/release-publish"
+          current_manifest_url="$RELEASE_PUBLIC_BASE_URL/latest.json"
+          previous_manifest="${RUNNER_TEMP}/previous-latest.json"
+
+          if curl --fail --silent --show-error --location "$current_manifest_url" > "$previous_manifest"; then
+            echo "Loaded previous manifest from $current_manifest_url"
+          else
+            rm -f "$previous_manifest"
+            echo "No previous manifest found; publishing fresh prefix"
+          fi
+
+          content_type() {
+            case "$1" in
+              *.json) printf 'application/json' ;;
+              *.zip) printf 'application/zip' ;;
+              *.sh) printf 'text/x-shellscript; charset=utf-8' ;;
+              *.md) printf 'text/markdown; charset=utf-8' ;;
+              *) printf 'application/octet-stream' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
+          for file in "$release_dir"/*; do
+            [[ -f "$file" ]] || continue
+            key="$(basename "$file")"
+            ct="$(content_type "$file")"
+            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" >/dev/null
+          done
+
+          if [[ -f "$previous_manifest" ]]; then
+            mapfile -t old_assets < <(jq -r '.assets[]?.name // empty' "$previous_manifest")
+            mapfile -t new_assets < <(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            for asset in "${old_assets[@]}"; do
+              keep=0
+              for current in "${new_assets[@]}"; do
+                if [[ "$asset" == "$current" ]]; then
+                  keep=1
+                  break
+                fi
+              done
+              if [[ "$keep" -eq 0 ]]; then
+                printf '  delete %s/%s\n' "$R2_PREFIX" "$asset"
+                wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$asset" --remote >/dev/null 2>&1 || true
+              fi
+            done
+          fi

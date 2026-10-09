@@ -5,6 +5,13 @@
 - `.cnb.yml` 负责把 CNB 的 `main` 与 tag 同步到 GitHub。
 - `.github/workflows/zkey.yml` 支持 `repository_dispatch`、`workflow_dispatch`，也会在
   GitHub 收到 `v*` tag push 时自动构建并发布到 `https://releases.73zls.com/zkey`。
+- `nmtx/.github/workflows/ai-transfer.yml` 支持 `repository_dispatch`（`build-ai-transfer-release`）
+  与 `workflow_dispatch`。从 `sohaha/ai-transfer` 按精确 SHA 拉取源码，交叉编译
+  Linux / macOS / Windows 二进制（内嵌 web UI），创建 GitHub release，并把同一组资产
+  （二进制、`SHA256SUMS`、`install.sh` / `install.ps1` / `uninstall.sh` / `uninstall.ps1`、
+  `README.md`、`latest.json`）上传到 `https://releases.73zls.com/ai-transfer/`。
+  `latest.json` 是应用内更新检查读取的唯一清单，用 `no-cache, must-revalidate` 每次回源。
+  源仓侧用 `mise run release -- --bump patch`（或 `--version X.Y.Z`）触发。
 
 ## Zeno 服务端 + 客户端统一发布
 
@@ -74,6 +81,10 @@ mise run nmtx:ci -- --workflow zeno-computer.yml --version 0.0.1
 - `.github/workflows/zeno-server.yml`
 - `.github/workflows/zeno-computer.yml`
 - `scripts/zeno-resolve-source.sh`
+- `.github/workflows/ai-transfer.yml`（ai-transfer 发布流水线）
+- `.github/workflows/zcode.yml`
+- `.github/scripts/prepare-zcode-release-assets.mjs`
+- `.github/release-assets/zcode/README.md`、`install.sh`（发布时随产物上传到 R2 `zcode/` 前缀）
 
 远端仓库已存在 `.github/actions/macos-code-sign/signing_helpers.sh`，当前 `zkey.yml` 直接复用它。
 
