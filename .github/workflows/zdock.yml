@@ -2,8 +2,9 @@ name: Build Zdock Release
 
 # Zdock is a Tauri desktop app. This workflow builds the installers on GitHub
 # runners from the CNB source (so no GitHub code mirror is required), then
-# uploads the stable, download-ready assets plus a `latest.json` manifest and an
-# install README to Cloudflare R2 under https://releases.73zls.com/zdock.
+# uploads the stable, download-ready assets plus a `latest.json` manifest, an
+# install README and one-line installers (install.sh / install.ps1) to
+# Cloudflare R2 under https://releases.73zls.com/zdock.
 #
 # Trigger it from the source repo:
 #   mise run nmtx:ci            # or: bash scripts/nmtx-ci.sh
@@ -659,7 +660,12 @@ jobs:
             "${RUNNER_TEMP}/release-publish" \
             "$VERSION" \
             "$RELEASE_PUBLIC_BASE_URL"
-          cp .github/release-assets/README.md "${RUNNER_TEMP}/release-publish/README.md"
+          # 随产物一起发布 README 与一键安装脚本，让
+          # https://releases.73zls.com/zdock/ 自包含。
+          cp .github/release-assets/zdock/README.md "${RUNNER_TEMP}/release-publish/README.md"
+          cp .github/release-assets/zdock/install.sh "${RUNNER_TEMP}/release-publish/install.sh"
+          cp .github/release-assets/zdock/install.ps1 "${RUNNER_TEMP}/release-publish/install.ps1"
+          bash -n "${RUNNER_TEMP}/release-publish/install.sh"
           cat "${RUNNER_TEMP}/release-publish/latest.json"
 
       - name: Upload latest release to R2
@@ -684,6 +690,8 @@ jobs:
           content_type() {
             case "$1" in
               *.json) printf 'application/json' ;;
+              *.sh) printf 'text/x-shellscript; charset=utf-8' ;;
+              *.ps1) printf 'text/plain; charset=utf-8' ;;
               *.md) printf 'text/markdown; charset=utf-8' ;;
               *.dmg) printf 'application/x-apple-diskimage' ;;
               *.exe) printf 'application/vnd.microsoft.portable-executable' ;;
@@ -693,14 +701,27 @@ jobs:
             esac
           }
 
+          # 缓存策略：latest.json 是应用更新检查的唯一事实源，必须每次回源；
+          # README 与安装脚本每次发布覆盖同名 key，同样不能长缓存；
+          # 版本化产物文件名带版本号，可以长缓存。
+          cache_control() {
+            case "$(basename "$1")" in
+              latest.json|README.md|install.sh|install.ps1)
+                printf 'no-cache, must-revalidate' ;;
+              *)
+                printf 'public, max-age=31536000, immutable' ;;
+            esac
+          }
+
           echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
           for file in "$release_dir"/*; do
             [[ -f "$file" ]] || continue
             key="$(basename "$file")"
             ct="$(content_type "$file")"
-            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            cc="$(cache_control "$file")"
+            printf '  put %s/%s (%s)\n' "$R2_PREFIX" "$key" "$cc"
             wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
-              --remote --file "$file" --content-type "$ct" >/dev/null
+              --remote --file "$file" --content-type "$ct" --cache-control "$cc" >/dev/null
           done
 
           if [[ -f "$previous_manifest" ]]; then

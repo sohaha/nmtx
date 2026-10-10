@@ -85,6 +85,9 @@ mise run nmtx:ci -- --workflow zeno-computer.yml --version 0.0.1
 - `.github/workflows/zcode.yml`
 - `.github/scripts/prepare-zcode-release-assets.mjs`
 - `.github/release-assets/zcode/README.md`、`install.sh`（发布时随产物上传到 R2 `zcode/` 前缀）
+- `.github/workflows/zdock.yml`
+- `.github/scripts/prepare-zdock-release-assets.mjs`
+- `.github/release-assets/zdock/README.md`、`install.sh`、`install.ps1`（发布时随产物上传到 R2 `zdock/` 前缀）
 
 远端仓库已存在 `.github/actions/macos-code-sign/signing_helpers.sh`，当前 `zkey.yml` 直接复用它。
 
