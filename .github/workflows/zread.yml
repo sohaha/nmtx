@@ -1,0 +1,398 @@
+name: Build Zread Release
+
+on:
+  repository_dispatch:
+    types: [build-zread-release]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: master
+        description: zread branch, tag, bare 40-character SHA, or full CNB commit URL.
+      version:
+        required: true
+        type: string
+        description: Release version, for example 0.2.0 or 0.2.0-beta.1.
+      release_tag:
+        required: false
+        type: string
+        description: Optional release tag. Defaults to v<version>.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version || github.event.client_payload.version || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/zread
+  RELEASE_REPO: sohaha/zread-release
+  SOURCE_REPO: zls_nmtx/sohaha/zread
+  ZREAD_PUBLIC_BASE_URL: https://releases.73zls.com/zread
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.payload.outputs.source_ref }}
+      source_fetch_ref: ${{ steps.payload.outputs.source_fetch_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      version: ${{ steps.payload.outputs.version }}
+      release_tag: ${{ steps.payload.outputs.release_tag }}
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            source_ref="${DISPATCH_SOURCE_REF:-master}"
+            version="${DISPATCH_VERSION:-}"
+            release_tag="${DISPATCH_RELEASE_TAG:-}"
+          else
+            source_ref="$INPUT_SOURCE_REF"
+            version="$INPUT_VERSION"
+            release_tag="$INPUT_RELEASE_TAG"
+          fi
+
+          # 支持完整的 CNB commit URL
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zread/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid version: $version"
+            exit 1
+          }
+          if [[ -z "$release_tag" ]]; then
+            release_tag="v${version}"
+          fi
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: $release_tag"
+            exit 1
+          }
+
+          source_fetch_ref="$source_ref"
+          if [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            source_fetch_ref="$release_tag"
+          fi
+
+          {
+            echo "source_ref=$source_ref"
+            echo "source_fetch_ref=$source_fetch_ref"
+            echo "version=$version"
+            echo "release_tag=$release_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CNB_TOKEN \
+            RELEASE_TOKEN \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
+            printf '  - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$(
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF" |
+                awk 'NR == 1 { print $1 }'
+            )"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve Zread source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_FETCH_REF: ${{ needs.resolve.outputs.source_fetch_ref }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Fetch zread source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          [[ "$(git -C "$build_root" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          source_version="$(tr -d ' \r\n' < "$build_root/VERSION")"
+          [[ "$source_version" == "$RELEASE_VERSION" ]] || {
+            echo "workflow version $RELEASE_VERSION does not match VERSION file $source_version"
+            exit 1
+          }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "${{ github.workspace }}/build-src/go.mod"
+          cache: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build all platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          ./build.sh
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          release_dir="${GITHUB_WORKSPACE}/release"
+          source_sha="$(git -C "$build_root" rev-parse HEAD)"
+
+          node "$build_root/scripts/prepare-zread-release.mjs" \
+            "$build_root/dist" "$release_dir" "$RELEASE_VERSION" \
+            "$RELEASE_REPO" "$SOURCE_REPO" "$source_sha" "$ZREAD_PUBLIC_BASE_URL"
+
+          bash "$build_root/scripts/verify-zread-release.sh" "$release_dir" "$RELEASE_VERSION"
+
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+          find "$release_dir" -maxdepth 1 -type f -print
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zread-${{ needs.resolve.outputs.version }}
+          path: ${{ env.RELEASE_DIR }}
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: zread-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/zread-release
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/zread-release"
+
+          if ! gh repo view "$RELEASE_REPO" >/dev/null 2>&1; then
+            echo "::warning::release repo $RELEASE_REPO 不存在或无权限，跳过 GitHub Release 发布（R2 不受影响）"
+            exit 0
+          fi
+
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          ## zread v${RELEASE_VERSION}
+
+          Cross-platform release: macOS, Linux, Windows, FreeBSD, OpenBSD, NetBSD.
+
+          ### Install
+
+          **macOS / Linux / BSD:**
+          \`\`\`bash
+          curl -fsSL https://releases.73zls.com/zread/install.sh | bash
+          \`\`\`
+          EOF
+
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --repo "$RELEASE_REPO" \
+              --title "zread ${RELEASE_VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$RELEASE_REPO" \
+            --title "zread ${RELEASE_VERSION}" \
+            --notes-file "${RUNNER_TEMP}/notes.md"
+
+          mapfile -t assets < <(find "$release_dir" -maxdepth 1 -type f | sort)
+          [[ "${#assets[@]}" -gt 0 ]] || {
+            echo "no release assets found"
+            exit 1
+          }
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" --clobber
+
+  publish-r2:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_BUCKET: releases
+      R2_PREFIX: zread
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: zread-${{ needs.resolve.outputs.version }}
+          path: ${{ runner.temp }}/zread-release
+
+      - name: Upload to Cloudflare R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          release_dir="${{ runner.temp }}/zread-release"
+
+          content_type() {
+            case "$1" in
+              *.sh) printf 'text/x-shellscript' ;;
+              *.md) printf 'text/markdown' ;;
+              *.json) printf 'application/json' ;;
+              *.txt) printf 'text/plain' ;;
+              *) printf 'application/octet-stream' ;;
+            esac
+          }
+
+          echo "Uploading to s3://$R2_BUCKET/$R2_PREFIX/"
+          for file in "$release_dir"/*; do
+            [[ -f "$file" ]] || continue
+            key="$(basename "$file")"
+            ct="$(content_type "$file")"
+            printf '  put %s/%s\n' "$R2_PREFIX" "$key"
+            wrangler r2 object put "$R2_BUCKET/$R2_PREFIX/$key" \
+              --remote --file "$file" --content-type "$ct" >/dev/null
+          done
+
+          echo "Done. Published under $ZREAD_PUBLIC_BASE_URL/"
+
+
+  cleanup-old-releases:
+    needs: [resolve, publish, publish-r2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_BUCKET: releases
+      R2_PREFIX: zread
+    steps:
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler
+
+      - name: Prune older releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          if ! gh repo view "$RELEASE_REPO" >/dev/null 2>&1; then
+            echo "release repo $RELEASE_REPO 不存在或无权限，跳过清理"
+            exit 0
+          fi
+
+          mapfile -t old_tags < <(
+            gh release list --repo "$RELEASE_REPO" --limit 100 --json tagName,createdAt               | jq -r 'map(select(.tagName | test("^v[0-9]+\.[0-9]+\.[0-9]+"))) | sort_by(.createdAt) | reverse | .[2:][]?.tagName'
+          )
+
+          if ((${#old_tags[@]} == 0)); then
+            echo "No older releases to prune"
+            exit 0
+          fi
+
+          for tag in "${old_tags[@]}"; do
+            echo "Pruning $tag"
+            mapfile -t assets < <(gh release view "$tag" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for asset in "${assets[@]}"; do
+              gh release delete-asset "$tag" "$asset" --repo "$RELEASE_REPO" --yes >/dev/null 2>&1 || true
+              # 只删除版本化二进制；install.sh/checksums.txt/release-manifest.json/README.md
+              # 是始终指向最新版的共享入口文件，不能随旧版本清理。
+              if [[ "$asset" == zread-* ]]; then
+                wrangler r2 object delete "$R2_BUCKET/$R2_PREFIX/$asset" --remote >/dev/null 2>&1 || true
+              fi
+            done
+            gh release delete "$tag" --repo "$RELEASE_REPO" --yes >/dev/null 2>&1 || true
+          done
