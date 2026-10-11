@@ -82,9 +82,9 @@ mise run nmtx:ci -- --workflow zeno-computer.yml --version 0.0.1
 - `.github/workflows/zeno-computer.yml`
 - `scripts/zeno-resolve-source.sh`
 - `.github/workflows/ai-transfer.yml`（ai-transfer 发布流水线）
-- `.github/workflows/zcode.yml`
-- `.github/scripts/prepare-zcode-release-assets.mjs`
-- `.github/release-assets/zcode/README.md`、`install.sh`（发布时随产物上传到 R2 `zcode/` 前缀）
+- `.github/workflows/zuno.yml`
+- `.github/scripts/prepare-zuno-release-assets.mjs`
+- `.github/release-assets/zuno/README.md`、`install.sh`、`install.ps1`、`uninstall.sh`、`uninstall.ps1`（发布时随产物上传到 R2 `zuno/` 前缀）
 - `.github/workflows/zdock.yml`
 - `.github/scripts/prepare-zdock-release-assets.mjs`
 - `.github/release-assets/zdock/README.md`、`install.sh`、`install.ps1`（发布时随产物上传到 R2 `zdock/` 前缀）
