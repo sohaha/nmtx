@@ -48,6 +48,8 @@ class ReleaseContracts(unittest.TestCase):
             for path, mime, cache in (
                 ("README.md", "text/markdown; charset=utf-8", "no-cache, must-revalidate"),
                 ("install.sh", "text/x-shellscript", "public, max-age=3600"),
+                ("uninstall.sh", "text/x-shellscript", "public, max-age=3600"),
+                ("uninstall.ps1", "text/plain; charset=utf-8", "public, max-age=3600"),
                 ("manifest.json", "application/json", "no-cache, must-revalidate"),
                 ("0.0.1/binary", "application/octet-stream", "public, max-age=31536000, immutable"),
             ):

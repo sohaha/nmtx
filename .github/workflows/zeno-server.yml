@@ -13,7 +13,10 @@ name: Build Zeno Server Release
 #   zeno/server/versions.json            release index (retain-pruned)
 #   zeno/server/<version>/manifest.json  per-version target manifest
 #   zeno/server/<version>/<file>         binaries + .sha256 / SHA256SUMS
-#   zeno/server/install.sh, install.ps1  bucket-root installers
+#   zeno/server/install.sh, install.ps1
+#                                     bucket-root installers
+#   zeno/server/uninstall.sh, uninstall.ps1
+#                                     shared uninstallers (server + client)
 #   zeno/server/README.md                installation and operation guide
 #
 # Retention: keeps only the N most recently PUBLISHED versions per channel
@@ -536,7 +539,7 @@ jobs:
             case "$1" in
               manifest.json|alpha/manifest.json|versions.json|README.md)
                 printf 'no-cache, must-revalidate' ;;
-              install.sh|install.ps1)
+              install.sh|install.ps1|uninstall.sh|uninstall.ps1)
                 printf 'public, max-age=3600' ;;
               *)
                 printf 'public, max-age=31536000, immutable' ;;

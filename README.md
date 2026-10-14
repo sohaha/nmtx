@@ -68,6 +68,17 @@ mise run nmtx:ci -- --workflow zeno-computer.yml --version 0.0.1
 `no-cache, must-revalidate`，不会把可变根文档标记为一年不可变缓存。
 源码提交记录在各自的 `<version>/provenance.txt`，不是发布根目录。
 
+两端还各上传一份相同的统一卸载脚本（源码在 zbot 仓库根目录 `scripts/uninstall.sh`、
+`scripts/uninstall.ps1`，由 `scripts/release-ci.mjs` 的 `UNINSTALLERS` 注入）：
+
+| 产品 | R2 卸载脚本 |
+| --- | --- |
+| 服务端 | <https://releases.73zls.com/zeno/server/uninstall.sh>、`uninstall.ps1` |
+| 客户端 | <https://releases.73zls.com/zeno/uninstall.sh>、`uninstall.ps1` |
+
+脚本运行时会自行判断本机装了服务端还是客户端，默认只删二进制、服务与自启动项，
+`--purge` / `-Purge` 才删数据；与安装脚本一样使用 1 小时可缓存策略。
+
 注意：默认发布构建产物；仅 `--no-publish` 会跳过 R2。版本化产物采用 immutable 缓存，
 覆盖同一版本不是常规升级路径，边缘缓存或本地缓存可能仍保留旧字节；正常发布应递增版本。
 
@@ -103,4 +114,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_zeno_
 bash -n scripts/zeno-resolve-source.sh
 # 安装 actionlint 后检查工作流语法、复用输入与权限
 actionlint -shellcheck= -pyflakes= .github/workflows/zeno-{release,server,computer}.yml
+```
+
+安装/卸载脚本侧的离线检查（zbot 仓库根目录执行，全部只在本仓库的沙箱目录内
+组装发布树并运行真实脚本，不访问网络）：
+
+```bash
+# 发布树根资产 + 真实 install.sh 输出 + 发布副本 uninstall.sh 的 curl|sh 路径 + 卸载自测
+sh scripts/verify-zeno-installers.sh
+# 发布树打包与 README/安装脚本一致性的单元测试
+node --test scripts/release-ci.test.mjs
 ```
