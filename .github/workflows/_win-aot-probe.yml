@@ -49,51 +49,52 @@ jobs:
           npm ci
           npm run build:min
 
-      - name: Build AOT windows-x64 (no smoke)
+      - name: Build AOT windows-x64 variant A (our flags)
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           bash scripts/bundle/bundle-all-bolt.sh
+          mv dist/bundle/windows-x64/zpi.exe dist/bundle/windows-x64/zpi-A-ourflags.exe
 
-      - name: Probe the AOT exe
+      - name: Build AOT windows-x64 variant B (default max-bytecode)
+        shell: bash
+        env:
+          BUN_JSC_maximumAOTCandidateBytecodeSize: "262144"
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash scripts/bundle/bundle-all-bolt.sh
+          mv dist/bundle/windows-x64/zpi.exe dist/bundle/windows-x64/zpi-B-defaultmax.exe
+
+      - name: Probe both variants
         shell: bash
         run: |
           set +e
-          cd "${GITHUB_WORKSPACE}/build-src"
-          BIN="dist/bundle/windows-x64/zpi.exe"
-          WBIN="$(cygpath -w "$BIN")"
-          echo "bin=$WBIN"
-          ls -la "$BIN"
+          cd "${GITHUB_WORKSPACE}/build-src/dist/bundle/windows-x64"
 
           peinfo() {
             node -e '
               const fs=require("fs");const p=process.argv[1];
               const b=fs.readFileSync(p);
-              const mz=b.toString("latin1",0,2);
               const lf=b.readUInt32LE(0x3c);
               const sig=b.toString("latin1",lf,lf+4);
-              const machine=(lf>0 && lf+6<=b.length)?b.readUInt16LE(lf+4):-1;
-              const subsys=(lf>0 && lf+0x5e<=b.length)?b.readUInt16LE(lf+0x5c):-1;
-              console.log("  file",p);
-              console.log("  size",b.length,"mz",JSON.stringify(mz),"e_lfanew",lf,"sig",JSON.stringify(sig),
-                "machine","0x"+Number(machine).toString(16),"subsystem",subsys);
+              const machine=(lf+6<=b.length)?b.readUInt16LE(lf+4):-1;
+              console.log("  ",p,"size",b.length,"mz",JSON.stringify(b.toString("latin1",0,2)),
+                "sig",JSON.stringify(sig),"machine","0x"+Number(machine).toString(16));
             ' "$1"
           }
-          echo "=== PE info: AOT zpi.exe ==="; peinfo "$BIN"
-          echo "=== PE info: control notepad.exe ==="; peinfo "/c/Windows/System32/notepad.exe"
-
           runb() { local secs="$1"; shift; "$@" & local p=$! w=0
             while kill -0 "$p" 2>/dev/null; do sleep 1; w=$((w+1));
               if [ "$w" -ge "$secs" ]; then echo "  [TIMEOUT ${secs}s]"; kill -9 "$p" 2>/dev/null||true; return 124; fi; done
             wait "$p"; return $?; }
 
-          echo "=== direct exec ==="
-          "./$BIN" --version; echo "  real_rc=$?"
-          echo "=== powershell & ==="
-          powershell -NoProfile -NonInteractive -Command "& '$WBIN' --version; exit \$LASTEXITCODE"; echo "  real_rc=$?"
-          echo "=== cmd /c (60s) ==="
-          runb 60 cmd //c "$WBIN" --version; echo "  real_rc=$?"
-          echo "=== notepad control (powershell) ==="
-          powershell -NoProfile -NonInteractive -Command "\$p=Start-Process -FilePath 'C:\Windows\System32\notepad.exe' -PassThru; Start-Sleep 1; if(\$p.HasExited){'notepad exited ' + \$p.ExitCode}else{'notepad started ok'; \$p.Kill()}"
+          for f in zpi-A-ourflags.exe zpi-B-defaultmax.exe; do
+            echo "===== $f ====="
+            ls -la "$f"
+            peinfo "$f"
+            echo "-- executable? --"; node -e 'const b=require("fs").readFileSync(process.argv[1]);const lf=b.readUInt32LE(0x3c);console.log("  characteristics 0x"+b.readUInt16LE(lf+4+18).toString(16),"sizeOfImage",b.readUInt32LE(lf+0x50),"sizeOfHeaders",b.readUInt32LE(lf+0x54))' "$f"
+            echo "-- powershell --"; WPS="$(cygpath -w "$PWD/$f")"; powershell -NoProfile -NonInteractive -Command "& '$WPS' --version; exit \$LASTEXITCODE"; echo "  ps_rc=$?"
+            echo "-- cmd (30s) --"; runb 30 cmd //c "$(cygpath -w "$PWD/$f")" --version; echo "  cmd_rc=$?"
+          done
           echo "=== done ==="
