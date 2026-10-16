@@ -253,6 +253,19 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src"
           npm run bundle:all:bolt:archive
 
+      - name: Diagnostic - plain windows-x64 (no AOT) on same harness
+        # 判定 Windows AOT 产物问题 vs harness 问题：同一 runner/同一 harness 跑非 AOT 产物
+        if: always() && matrix.platform == 'windows-x64'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash scripts/bundle/bundle.sh \
+            --target bun-windows-x64-modern \
+            --output "dist/bundle/plain-win/zpi.exe" --release --lite
+          bash scripts/bundle/smoke-zpi.sh "dist/bundle/plain-win/zpi.exe"
+
       - name: Upload per-platform archive
         uses: actions/upload-artifact@v4
         with:
