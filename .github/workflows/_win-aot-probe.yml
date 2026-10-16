@@ -65,22 +65,35 @@ jobs:
           WBIN="$(cygpath -w "$BIN")"
           echo "bin=$WBIN"
           ls -la "$BIN"
-          node -e 'const fs=require("fs");const b=fs.readFileSync(process.argv[1]).subarray(0,4);console.log("magic hex",b.toString("hex"),"str",JSON.stringify(b.toString("latin1")),"size",fs.statSync(process.argv[1]).size)' "$BIN"
 
-          runb() { # $1=secs rest=cmd
-            local secs="$1"; shift
-            "$@" & local p=$! w=0
-            while kill -0 "$p" 2>/dev/null; do
-              sleep 1; w=$((w+1))
-              if [ "$w" -ge "$secs" ]; then echo "  [TIMEOUT ${secs}s]"; kill -9 "$p" 2>/dev/null || true; return 124; fi
-            done
-            wait "$p"; return $?
+          peinfo() {
+            node -e '
+              const fs=require("fs");const p=process.argv[1];
+              const b=fs.readFileSync(p);
+              const mz=b.toString("latin1",0,2);
+              const lf=b.readUInt32LE(0x3c);
+              const sig=b.toString("latin1",lf,lf+4);
+              const machine=(lf>0 && lf+6<=b.length)?b.readUInt16LE(lf+4):-1;
+              const subsys=(lf>0 && lf+0x5e<=b.length)?b.readUInt16LE(lf+0x5c):-1;
+              console.log("  file",p);
+              console.log("  size",b.length,"mz",JSON.stringify(mz),"e_lfanew",lf,"sig",JSON.stringify(sig),
+                "machine","0x"+Number(machine).toString(16),"subsystem",subsys);
+            ' "$1"
           }
+          echo "=== PE info: AOT zpi.exe ==="; peinfo "$BIN"
+          echo "=== PE info: control notepad.exe ==="; peinfo "/c/Windows/System32/notepad.exe"
 
-          echo "=== C) direct exec, 120s ==="
-          s=$(date +%s); runb 120 "./$BIN" --version || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
-          echo "=== B) powershell &, 300s ==="
-          s=$(date +%s); runb 300 powershell -NoProfile -NonInteractive -Command "& '$BIN' --version; exit \$LASTEXITCODE" || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
-          echo "=== A) cmd //c, 300s ==="
-          s=$(date +%s); runb 300 cmd //c "$WBIN" --version || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
+          runb() { local secs="$1"; shift; "$@" & local p=$! w=0
+            while kill -0 "$p" 2>/dev/null; do sleep 1; w=$((w+1));
+              if [ "$w" -ge "$secs" ]; then echo "  [TIMEOUT ${secs}s]"; kill -9 "$p" 2>/dev/null||true; return 124; fi; done
+            wait "$p"; return $?; }
+
+          echo "=== direct exec ==="
+          "./$BIN" --version; echo "  real_rc=$?"
+          echo "=== powershell & ==="
+          powershell -NoProfile -NonInteractive -Command "& '$WBIN' --version; exit \$LASTEXITCODE"; echo "  real_rc=$?"
+          echo "=== cmd /c (60s) ==="
+          runb 60 cmd //c "$WBIN" --version; echo "  real_rc=$?"
+          echo "=== notepad control (powershell) ==="
+          powershell -NoProfile -NonInteractive -Command "\$p=Start-Process -FilePath 'C:\Windows\System32\notepad.exe' -PassThru; Start-Sleep 1; if(\$p.HasExited){'notepad exited ' + \$p.ExitCode}else{'notepad started ok'; \$p.Kill()}"
           echo "=== done ==="
