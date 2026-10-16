@@ -1,0 +1,86 @@
+# 一次性诊断：在 windows-2022 上编 Pi-Bolt AOT 的 windows-x64，并用多种方式+长超时执行产物，
+# 判定「产物问题 vs 我们的调用/harness/超时问题」。（非发布流程，用后即删。）
+name: win-aot-probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/pi-nm
+  SOURCE_REF: v0.2.75
+
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - name: Fetch pi-nm source (${{ env.SOURCE_REF }})
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -euo pipefail
+          build_root="${GITHUB_WORKSPACE}/build-src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          rm -rf "$build_root"
+          git init "$build_root"
+          git -C "$build_root" \
+            -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+          git -C "$build_root" checkout --force FETCH_HEAD
+          git -C "$build_root" rev-parse --short HEAD
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install deps + build:min
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          npm ci
+          npm run build:min
+
+      - name: Build AOT windows-x64 (no smoke)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          bash scripts/bundle/bundle-all-bolt.sh
+
+      - name: Probe the AOT exe
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/build-src"
+          BIN="dist/bundle/windows-x64/zpi.exe"
+          WBIN="$(cygpath -w "$BIN")"
+          echo "bin=$WBIN"
+          ls -la "$BIN"
+          node -e 'const fs=require("fs");const b=fs.readFileSync(process.argv[1]).subarray(0,4);console.log("magic hex",b.toString("hex"),"str",JSON.stringify(b.toString("latin1")),"size",fs.statSync(process.argv[1]).size)' "$BIN"
+
+          runb() { # $1=secs rest=cmd
+            local secs="$1"; shift
+            "$@" & local p=$! w=0
+            while kill -0 "$p" 2>/dev/null; do
+              sleep 1; w=$((w+1))
+              if [ "$w" -ge "$secs" ]; then echo "  [TIMEOUT ${secs}s]"; kill -9 "$p" 2>/dev/null || true; return 124; fi
+            done
+            wait "$p"; return $?
+          }
+
+          echo "=== A) cmd //c, 300s ==="
+          s=$(date +%s); runb 300 cmd //c "$WBIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== B) powershell &, 300s ==="
+          s=$(date +%s); runb 300 powershell -NoProfile -NonInteractive -Command "& '$BIN' --version; exit \$LASTEXITCODE"; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== C) direct exec, 120s ==="
+          s=$(date +%s); runb 120 "./$BIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== D) 再次 cmd //c（缓存后） ==="
+          s=$(date +%s); runb 120 cmd //c "$WBIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"

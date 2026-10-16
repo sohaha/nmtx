@@ -325,8 +325,8 @@ jobs:
           npm run build:min
 
       - name: Cross-compile Windows (bun fallback)
-        # Windows AOT 已实证不可用：Pi-Bolt win32-x64 产物为合法 PE 但运行时挂死
-        # （同 runner/同 harness 下非 AOT 产物可正常跑）。两目标均用 bun 交叉编译。
+        # Windows AOT：Pi-Bolt 官方支持（BUILDING.md On Windows），但我们的产物在 smoke
+        # harness 下未跑通（待定位，非 Pi-Bolt 侧断言）。暂用交叉编译保证发布可用。
         shell: bash
         run: |
           set -euo pipefail
