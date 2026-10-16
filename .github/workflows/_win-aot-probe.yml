@@ -59,6 +59,7 @@ jobs:
       - name: Probe the AOT exe
         shell: bash
         run: |
+          set +e
           cd "${GITHUB_WORKSPACE}/build-src"
           BIN="dist/bundle/windows-x64/zpi.exe"
           WBIN="$(cygpath -w "$BIN")"
@@ -76,11 +77,10 @@ jobs:
             wait "$p"; return $?
           }
 
-          echo "=== A) cmd //c, 300s ==="
-          s=$(date +%s); runb 300 cmd //c "$WBIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
-          echo "=== B) powershell &, 300s ==="
-          s=$(date +%s); runb 300 powershell -NoProfile -NonInteractive -Command "& '$BIN' --version; exit \$LASTEXITCODE"; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
           echo "=== C) direct exec, 120s ==="
-          s=$(date +%s); runb 120 "./$BIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
-          echo "=== D) 再次 cmd //c（缓存后） ==="
-          s=$(date +%s); runb 120 cmd //c "$WBIN" --version; echo "  exit=$? elapsed=$(( $(date +%s) - s ))s"
+          s=$(date +%s); runb 120 "./$BIN" --version || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== B) powershell &, 300s ==="
+          s=$(date +%s); runb 300 powershell -NoProfile -NonInteractive -Command "& '$BIN' --version; exit \$LASTEXITCODE" || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== A) cmd //c, 300s ==="
+          s=$(date +%s); runb 300 cmd //c "$WBIN" --version || true; echo "  rc=$? elapsed=$(( $(date +%s) - s ))s"
+          echo "=== done ==="
