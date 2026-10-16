@@ -184,10 +184,6 @@ jobs:
             platform: linux-arm64
             bin: zpi
             aot_cpu: native
-          - runner: windows-2022
-            platform: windows-x64
-            bin: zpi.exe
-            aot_cpu: native
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -252,19 +248,6 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
           npm run bundle:all:bolt:archive
-
-      - name: Diagnostic - plain windows-x64 (no AOT) on same harness
-        # 判定 Windows AOT 产物问题 vs harness 问题：同一 runner/同一 harness 跑非 AOT 产物
-        if: always() && matrix.platform == 'windows-x64'
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          cd "${GITHUB_WORKSPACE}/build-src"
-          bash scripts/bundle/bundle.sh \
-            --target bun-windows-x64-modern \
-            --output "dist/bundle/plain-win/zpi.exe" --release --lite
-          bash scripts/bundle/smoke-zpi.sh "dist/bundle/plain-win/zpi.exe"
 
       - name: Upload per-platform archive
         uses: actions/upload-artifact@v4
@@ -341,24 +324,31 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src"
           npm run build:min
 
-      - name: Cross-compile windows-arm64 (bun fallback)
+      - name: Cross-compile Windows (bun fallback)
+        # Windows AOT 已实证不可用：Pi-Bolt win32-x64 产物为合法 PE 但运行时挂死
+        # （同 runner/同 harness 下非 AOT 产物可正常跑）。两目标均用 bun 交叉编译。
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          bash scripts/bundle/bundle.sh \
-            --target bun-windows-arm64-modern \
-            --output "dist/bundle/windows-arm64/zpi.exe" \
-            --release --lite
-          bash scripts/bundle/_archive.sh \
-            "dist/bundle/windows-arm64/zpi.exe" \
-            "dist/bundle/windows-arm64.zip" --lite
+          for entry in "windows-x64:bun-windows-x64-modern" "windows-arm64:bun-windows-arm64-modern"; do
+            plat="${entry%%:*}"; target="${entry#*:}"
+            bash scripts/bundle/bundle.sh \
+              --target "$target" \
+              --output "dist/bundle/$plat/zpi.exe" \
+              --release --lite
+            bash scripts/bundle/_archive.sh \
+              "dist/bundle/$plat/zpi.exe" \
+              "dist/bundle/$plat.zip" --lite
+          done
 
-      - name: Upload per-platform archive
+      - name: Upload per-platform archives
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-windows-arm64
-          path: build-src/dist/bundle/windows-arm64.zip
+          name: bundle-windows-cross
+          path: |
+            build-src/dist/bundle/windows-x64.zip
+            build-src/dist/bundle/windows-arm64.zip
           if-no-files-found: error
 
   # ---- 汇聚各平台归档，生成 release 资产 ----
