@@ -184,6 +184,10 @@ jobs:
             platform: linux-arm64
             bin: zpi
             aot_cpu: native
+          - runner: windows-2022
+            platform: windows-x64
+            bin: zpi.exe
+            aot_cpu: native
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -325,13 +329,13 @@ jobs:
           npm run build:min
 
       - name: Cross-compile Windows (bun fallback)
-        # Windows AOT：Pi-Bolt 官方支持（BUILDING.md On Windows），但我们的产物在 smoke
-        # harness 下未跑通（待定位，非 Pi-Bolt 侧断言）。暂用交叉编译保证发布可用。
+        # windows-x64 已移回上面的 AOT 原生矩阵（Bun `--windows-icon` 与 Pi-Bolt 静态堆
+        # PE 重写冲突，AOT 构建已跳过图标；win32-arm64 无 Pi-Bolt runtime，仍走交叉编译）。
         shell: bash
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          for entry in "windows-x64:bun-windows-x64-modern" "windows-arm64:bun-windows-arm64-modern"; do
+          for entry in "windows-arm64:bun-windows-arm64-modern"; do
             plat="${entry%%:*}"; target="${entry#*:}"
             bash scripts/bundle/bundle.sh \
               --target "$target" \
@@ -347,7 +351,6 @@ jobs:
         with:
           name: bundle-windows-cross
           path: |
-            build-src/dist/bundle/windows-x64.zip
             build-src/dist/bundle/windows-arm64.zip
           if-no-files-found: error
 
