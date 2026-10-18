@@ -13,6 +13,8 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_WORKFLOW = "zeno-release.yml"
+PRODUCTS = ("server", "computer")
 
 
 def workflow(name):
@@ -20,28 +22,77 @@ def workflow(name):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
+def release_workflow():
+    return workflow(RELEASE_WORKFLOW)
+
+
+def job_steps(data, job):
+    return data["jobs"][job]["steps"]
+
+
+def step_named(steps, name):
+    return next(step for step in steps if step.get("name") == name)
+
+
+def artifact_step(data, job, action):
+    return next(step for step in job_steps(data, job)
+                if step.get("uses", "").startswith(action))
+
+
 class ReleaseContracts(unittest.TestCase):
-    def test_combined_release_pins_source_and_calls_both_products(self):
-        release = workflow("zeno-release.yml")
-        inputs = release["on"]["workflow_dispatch"]["inputs"]
+    def test_release_is_one_dispatch_only_workflow(self):
+        release = release_workflow()
+        triggers = release["on"]
+        # One entry point: no reusable-call or repository_dispatch surface left.
+        self.assertEqual(set(triggers), {"workflow_dispatch"})
+        inputs = triggers["workflow_dispatch"]["inputs"]
         self.assertEqual(inputs["publish"]["default"], "true")
         self.assertEqual(inputs["retain"]["default"], "2")
-        jobs = release["jobs"]
-        self.assertEqual(set(jobs), {"resolve", "server", "computer"})
-        for product in ("server", "computer"):
-            job = jobs[product]
-            self.assertEqual(job["needs"], "resolve")
-            self.assertEqual(job["uses"], f"./.github/workflows/zeno-{product}.yml")
-            self.assertEqual(job["secrets"], "inherit")
-            self.assertEqual(job["with"]["source_ref"], "${{ needs.resolve.outputs.source_sha }}")
-            for key in ("version", "channel", "publish", "retain", "github_release"):
-                self.assertEqual(job["with"][key], "${{ inputs." + key + " }}")
+        for key in ("source_ref", "version"):
+            self.assertEqual(inputs[key]["required"], "true")
+        for key in ("release_tag", "channel", "publish", "github_release", "retain"):
+            self.assertEqual(inputs[key]["required"], "false")
         self.assertEqual(release["permissions"], {"contents": "read"})
+        # No job delegates to a reusable workflow anymore.
+        self.assertFalse([j for j in release["jobs"].values() if "uses" in j])
+
+    def test_release_job_graph_covers_both_products(self):
+        jobs = release_workflow()["jobs"]
+        self.assertEqual(set(jobs), {
+            "resolve",
+            "server-web",
+            "server-build",
+            "server-package",
+            "server-publish-r2",
+            "computer-build",
+            "computer-package",
+            "computer-publish-r2",
+            "computer-publish-github",
+        })
+        expected_needs = {
+            "server-web": "resolve",
+            "server-build": ["resolve", "server-web"],
+            "server-package": ["resolve", "server-build"],
+            "server-publish-r2": ["resolve", "server-package"],
+            "computer-build": "resolve",
+            "computer-package": ["resolve", "computer-build"],
+            "computer-publish-r2": ["resolve", "computer-package"],
+            "computer-publish-github": ["resolve", "computer-package"],
+        }
+        for job, needs in expected_needs.items():
+            self.assertEqual(jobs[job]["needs"], needs, job)
+        # Both publish legs gate on the shared resolve output.
+        self.assertEqual(jobs["server-publish-r2"]["if"], "needs.resolve.outputs.publish == 'true'")
+        self.assertEqual(
+            jobs["computer-publish-github"]["if"],
+            "needs.resolve.outputs.publish == 'true' && needs.resolve.outputs.github_release == 'true'",
+        )
 
     def test_readme_upload_is_markdown_and_revalidated(self):
-        for product in ("server", "computer"):
-            steps = workflow(f"zeno-{product}.yml")["jobs"]["publish-r2"]["steps"]
-            upload = next(step["run"] for step in steps if step.get("name") == "Upload to Cloudflare R2")
+        data = release_workflow()
+        for product in PRODUCTS:
+            upload = step_named(job_steps(data, f"{product}-publish-r2"),
+                                "Upload to Cloudflare R2")["run"]
             # Execute only the pure header functions, never the actual upload.
             functions = "\n".join(re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", upload).group()
                                   for name in ("content_type", "cache_control"))
@@ -58,40 +109,47 @@ class ReleaseContracts(unittest.TestCase):
                                              "headers", path], capture_output=True, text=True, check=True)
                     self.assertEqual(result.stdout, mime + "\n" + cache)
 
-    def test_standalone_inputs_are_also_callable(self):
-        for product in ("server", "computer"):
-            triggers = workflow(f"zeno-{product}.yml")["on"]
-            self.assertIn("repository_dispatch", triggers)
-            direct = triggers["workflow_dispatch"]["inputs"]
-            reusable = triggers["workflow_call"]["inputs"]
-            self.assertEqual(set(direct), set(reusable))
-            for key in direct:
-                for attribute in ("type", "required"):
-                    self.assertEqual(direct[key].get(attribute), reusable[key].get(attribute))
-                if reusable[key].get("required") == "true":
-                    self.assertNotIn("default", reusable[key])
-                else:
-                    self.assertEqual(direct[key].get("default"), reusable[key].get("default"))
+    def test_product_env_is_scoped_per_job(self):
+        data = release_workflow()
+        # The two products share one file now, so the differing bucket roots
+        # must NOT live at workflow level where they would leak across products.
+        self.assertNotIn("PUBLIC_BASE_URL", data["env"])
+        self.assertNotIn("R2_PREFIX", data["env"])
+        self.assertEqual(data["env"]["R2_BUCKET"], "releases")
+        scoped = {
+            "server-package": ("https://releases.73zls.com/zeno/server", "zeno/server"),
+            "server-publish-r2": ("https://releases.73zls.com/zeno/server", "zeno/server"),
+            "computer-package": ("https://releases.73zls.com/zeno", "zeno"),
+            "computer-publish-r2": ("https://releases.73zls.com/zeno", "zeno"),
+        }
+        for job, (base_url, prefix) in scoped.items():
+            self.assertEqual(data["jobs"][job]["env"]["PUBLIC_BASE_URL"], base_url, job)
+            self.assertEqual(data["jobs"][job]["env"]["R2_PREFIX"], prefix, job)
 
-    def test_concurrency_and_artifacts_are_isolated(self):
-        groups = []
-        artifacts = []
-        for product in ("server", "computer"):
-            data = workflow(f"zeno-{product}.yml")
-            group = data["concurrency"]["group"]
-            self.assertNotIn("github.workflow", group)
-            groups.append(group)
-            upload = next(step for step in data["jobs"]["build"]["steps"]
-                          if step.get("uses", "").startswith("actions/upload-artifact@"))
-            download = next(step for step in data["jobs"]["package"]["steps"]
-                            if step.get("uses", "").startswith("actions/download-artifact@"))
+    def test_artifacts_and_concurrency_are_isolated(self):
+        data = release_workflow()
+        self.assertNotIn("github.workflow", data["concurrency"]["group"])
+        self.assertIn("zeno-release-", data["concurrency"]["group"])
+
+        for product in PRODUCTS:
+            upload = artifact_step(data, f"{product}-build", "actions/upload-artifact@")
+            download = artifact_step(data, f"{product}-package", "actions/download-artifact@")
             prefix = f"zeno-{product}-sea-"
-            self.assertTrue(upload["with"]["name"].startswith(prefix))
-            self.assertEqual(download["with"]["pattern"], prefix + "*")
-            artifacts.append(upload["with"]["name"])
-        groups.append(workflow("zeno-release.yml")["concurrency"]["group"])
-        self.assertEqual(len(set(groups)), 3)
-        self.assertEqual(len(set(artifacts)), 2)
+            self.assertTrue(upload["with"]["name"].startswith(prefix), product)
+            self.assertEqual(download["with"]["pattern"], prefix + "*", product)
+
+        # Server web dist is built once and consumed by every server build leg.
+        web_upload = artifact_step(data, "server-web", "actions/upload-artifact@")
+        self.assertEqual(web_upload["with"]["name"], "zeno-web-dist")
+        web_download = artifact_step(data, "server-build", "actions/download-artifact@")
+        self.assertEqual(web_download["with"]["name"], "zeno-web-dist")
+
+        # Release-tree artifact names must not collide between products.
+        server_release = artifact_step(data, "server-package", "actions/upload-artifact@")
+        computer_release = artifact_step(data, "computer-package", "actions/upload-artifact@")
+        self.assertTrue(server_release["with"]["name"].startswith("zeno-server-release-"))
+        self.assertTrue(computer_release["with"]["name"].startswith("zeno-release-"))
+        self.assertNotEqual(server_release["with"]["name"], computer_release["with"]["name"])
 
 
 class SourceResolution(unittest.TestCase):
