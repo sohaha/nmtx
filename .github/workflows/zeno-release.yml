@@ -86,6 +86,8 @@ env:
   SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/bots
   SOURCE_REPO: zls_nmtx/sohaha/bots
   # GitHub mirror repo that receives the release assets when github_release=true.
+  # Must already exist AND contain at least one commit: GitHub rejects
+  # `gh release create` on an empty repo (HTTP 422 "Repository is empty").
   RELEASE_REPO: sohaha/zeno-computer-release
   R2_BUCKET: releases
   # Host node major must equal the SEA carrier major (build.mjs asserts it).
