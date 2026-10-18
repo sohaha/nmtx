@@ -152,6 +152,84 @@ class ReleaseContracts(unittest.TestCase):
         self.assertNotEqual(server_release["with"]["name"], computer_release["with"]["name"])
 
 
+class ResolveInputs(unittest.TestCase):
+    """The merged workflow resolves everything from workflow_dispatch inputs
+    (no repository_dispatch / client_payload), so the normalization + validation
+    contract lives entirely in the resolve job's `Resolve inputs` step."""
+
+    def _resolve(self, **inputs):
+        import textwrap
+        step = step_named(job_steps(release_workflow(), "resolve"), "Resolve inputs")
+        script = textwrap.dedent(step["run"])
+        # GitHub always injects every declared input as INPUT_* (empty string when
+        # unset), so the fixture must too — otherwise `set -u` trips on a key the
+        # workflow legitimately leaves unset.
+        declared = release_workflow()["on"]["workflow_dispatch"]["inputs"]
+        unknown = set(inputs) - set(declared)
+        self.assertFalse(unknown, f"undeclared input(s): {sorted(unknown)}")
+        input_env = {f"INPUT_{key.upper()}": inputs.get(key, "") for key in declared}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "gh_output"
+            output.touch()
+            env = {
+                **os.environ,
+                "GITHUB_OUTPUT": str(output),
+                **input_env,
+            }
+            result = subprocess.run(["bash", "-c", script], env=env,
+                                    capture_output=True, text=True)
+            values = {}
+            for line in output.read_text().splitlines():
+                key, _, value = line.partition("=")
+                values[key] = value
+            return result, values
+
+    def test_defaults_and_derivations(self):
+        result, out = self._resolve(source_ref="dev", version="0.0.11")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out, {
+            "source_ref": "dev",
+            "version": "0.0.11",
+            "release_tag": "computer-v0.0.11",
+            "channel": "latest",
+            "publish": "true",
+            "github_release": "false",
+            "retain": "2",
+        })
+
+    def test_prerelease_infers_alpha_and_accepts_commit_url(self):
+        url = "https://cnb.cool/zls_nmtx/sohaha/bots/-/commit/" + "a" * 40 + "/"
+        result, out = self._resolve(source_ref=url, version="0.0.11-rc.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out["source_ref"], "a" * 40)
+        self.assertEqual(out["channel"], "alpha")
+        self.assertEqual(out["release_tag"], "computer-v0.0.11-rc.3")
+
+    def test_explicit_values_win_and_boolean_coercion(self):
+        result, out = self._resolve(
+            source_ref="dev", version="0.0.11", release_tag="computer-v0.0.11",
+            channel="alpha", publish="false", github_release="true", retain="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out["channel"], "alpha")
+        self.assertEqual(out["publish"], "false")
+        self.assertEqual(out["github_release"], "true")
+        self.assertEqual(out["retain"], "1")
+
+    def test_invalid_values_fail_closed(self):
+        cases = {
+            "bad version": {"source_ref": "dev", "version": "1.2"},
+            "bad channel": {"source_ref": "dev", "version": "0.0.11", "channel": "beta"},
+            "bad retain": {"source_ref": "dev", "version": "0.0.11", "retain": "two"},
+            "bad release tag": {"source_ref": "dev", "version": "0.0.11", "release_tag": "v0.0.11"},
+            "bad source ref": {"source_ref": "bad ref", "version": "0.0.11"},
+        }
+        for label, inputs in cases.items():
+            with self.subTest(case=label):
+                result, _ = self._resolve(**inputs)
+                self.assertNotEqual(result.returncode, 0, f"{label} should fail")
+
+
 class SourceResolution(unittest.TestCase):
     def test_branch_tag_sha_and_commit_url_resolve_to_same_commit(self):
         with tempfile.TemporaryDirectory() as directory:
