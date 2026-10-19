@@ -73,6 +73,13 @@ jobs:
           if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zuno/-/commit/([0-9a-f]{40})/?$ ]]; then
             source_ref="${BASH_REMATCH[1]}"
           fi
+          # An abbreviated SHA is not a ref, so the resolve job's
+          # `git fetch <sha>` cannot look it up. Fail loudly here instead of
+          # surfacing the confusing "unable to resolve" later.
+          if [[ "$source_ref" =~ ^[0-9a-f]{7,39}$ ]]; then
+            echo "source_ref is an abbreviated SHA; pass the full 40-character SHA: $source_ref"
+            exit 1
+          fi
           [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
             echo "unsupported source ref: $source_ref"
             exit 1
