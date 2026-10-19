@@ -155,12 +155,12 @@ jobs:
         include:
           # x86_64 builds inside the manylinux2014 container (glibc 2.17
           # baseline + vendored OpenSSL) via scripts/build_linux_compat.sh,
-          # matching the official GitHub release binary.
+          # matching the published R2 Linux x86_64 ZIP.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             compat_container: true
           # aarch64 builds natively on the ARM runner with nightly + emulated
-          # TLS so the binary survives Termux kernels (see release.yml).
+          # TLS so the binary survives Termux kernels.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             compat_container: false
@@ -170,9 +170,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - name: Checkout nmtx helpers
-        uses: actions/checkout@v5
-
       - name: Fetch zuno source at exact SHA
         shell: bash
         env:
@@ -278,9 +275,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - name: Checkout nmtx helpers
-        uses: actions/checkout@v5
-
       - name: Fetch zuno source at exact SHA
         shell: bash
         env:
@@ -357,9 +351,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - name: Checkout nmtx helpers
-        uses: actions/checkout@v5
-
       - name: Fetch zuno source at exact SHA
         shell: bash
         env:
@@ -432,9 +423,6 @@ jobs:
     needs: [resolve, build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout nmtx helpers
-        uses: actions/checkout@v5
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -458,24 +446,102 @@ jobs:
           test "$count" -eq 6
           find "${RUNNER_TEMP}/release-assets" -maxdepth 1 -type f -printf '%f\n' | sort
 
+      - name: Fetch release inputs at the released SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Every published artifact comes from the zuno source tree at the
+          # released SHA: the changelog inputs, the landing page, and the four
+          # install/uninstall scripts. nmtx carries only the workflow, so there
+          # is no second copy of anything to drift.
+          src="${RUNNER_TEMP}/release-src"
+          rm -rf "$src"
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q "$src"
+          git -C "$src" \
+            -c credential.helper= \
+            -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git -C "$src" checkout --force FETCH_HEAD
+          git -C "$src" sparse-checkout set --no-cone \
+            /changelog \
+            /docs/releases \
+            /scripts/build_changelog_artifact.py \
+            /scripts/prepare_release_assets.mjs \
+            /scripts/install.sh \
+            /scripts/install.ps1 \
+            /scripts/uninstall.sh \
+            /scripts/uninstall.ps1
+
+          out="${RUNNER_TEMP}/release-inputs"
+          mkdir -p "$out"
+          python3 "$src/scripts/build_changelog_artifact.py" \
+            --changelog-dir "$src/changelog" \
+            --markdown "$out/CHANGELOG.md" \
+            --json "$out/changelog.json"
+
+          # The R2 landing page is docs/releases/README.md in the released
+          # source tree; publishing it from that SHA keeps the page in lockstep
+          # with the binaries it documents.
+          test -f "$src/docs/releases/README.md"
+          cp "$src/docs/releases/README.md" "$out/README.md"
+
+          # The served one-line installers and uninstallers are the repo's own
+          # scripts, copied verbatim so they can never drift from the source
+          # tree. The R2 manifest builder ships the same way.
+          for name in install.sh install.ps1 uninstall.sh uninstall.ps1; do
+            test -f "$src/scripts/$name"
+            cp "$src/scripts/$name" "$out/$name"
+          done
+          cp "$src/scripts/prepare_release_assets.mjs" "$out/prepare_release_assets.mjs"
+
+          # The in-app update card and `/changelog` read this document, so a
+          # release with no entry for its own version would ship a silent
+          # update. Refuse instead.
+          python3 - "$out/changelog.json" "$VERSION" << 'PY'
+          import json, sys
+          doc = json.load(open(sys.argv[1], encoding="utf-8"))
+          version = sys.argv[2].lstrip("v")
+          versions = [entry["version"] for entry in doc["entries"]]
+          if version not in versions:
+              raise SystemExit(
+                  f"changelog/v{version}.json is missing; add the release entry "
+                  f"before publishing (see changelog/README.md)"
+              )
+          print(f"changelog.json covers {len(versions)} releases, latest {doc['latest']}")
+          PY
+
       - name: Prepare R2 payload
         shell: bash
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          node .github/scripts/prepare-zuno-release-assets.mjs \
+          inputs="${RUNNER_TEMP}/release-inputs"
+          # Every input was fetched from the released source tree in the step
+          # above; this job never reads release scripts from the nmtx checkout.
+          node "$inputs/prepare_release_assets.mjs" \
             "${RUNNER_TEMP}/release-assets" \
             "${RUNNER_TEMP}/release-publish" \
             "$VERSION" \
             "$RELEASE_PUBLIC_BASE_URL"
-          # Ship the standalone install README + one-line installers alongside
-          # the binaries so https://releases.73zls.com/zuno/ is self-contained.
-          cp .github/release-assets/zuno/README.md "${RUNNER_TEMP}/release-publish/README.md"
-          cp .github/release-assets/zuno/install.sh "${RUNNER_TEMP}/release-publish/install.sh"
-          cp .github/release-assets/zuno/install.ps1 "${RUNNER_TEMP}/release-publish/install.ps1"
-          cp .github/release-assets/zuno/uninstall.sh "${RUNNER_TEMP}/release-publish/uninstall.sh"
-          cp .github/release-assets/zuno/uninstall.ps1 "${RUNNER_TEMP}/release-publish/uninstall.ps1"
+          # Ship the landing page and the one-line install/uninstall scripts
+          # from the released source tree so https://releases.73zls.com/zuno/
+          # is self-contained.
+          cp "$inputs/README.md" "${RUNNER_TEMP}/release-publish/README.md"
+          cp "$inputs/install.sh" "${RUNNER_TEMP}/release-publish/install.sh"
+          cp "$inputs/install.ps1" "${RUNNER_TEMP}/release-publish/install.ps1"
+          cp "$inputs/uninstall.sh" "${RUNNER_TEMP}/release-publish/uninstall.sh"
+          cp "$inputs/uninstall.ps1" "${RUNNER_TEMP}/release-publish/uninstall.ps1"
+          # The user-facing changelog is published next to latest.json so the
+          # in-app updater can show what actually changed.
+          cp "$inputs/changelog.json" "${RUNNER_TEMP}/release-publish/changelog.json"
+          cp "$inputs/CHANGELOG.md" "${RUNNER_TEMP}/release-publish/CHANGELOG.md"
           cat "${RUNNER_TEMP}/release-publish/latest.json"
 
       - name: Upload latest release to R2
