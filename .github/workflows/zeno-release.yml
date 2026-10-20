@@ -96,6 +96,12 @@ env:
   # JavaScriptCore internal, so a floating bun could silently change the
   # artifact contract. Matches the pin in mise.toml.
   BUN_VERSION: "1.4.3"
+  # The published computer artifact is the Bun build; the Node SEA build still
+  # runs as the fallback leg and is only published when Bun fails.
+  # Set the repo variable ZENO_COMPUTER_BYTECODE=1 to also ship the bytecode
+  # variant (~35% larger binary, ~55% larger download, ~7x faster startup).
+  # Default off: nothing extra is built or published.
+  ZENO_COMPUTER_BYTECODE: ${{ vars.ZENO_COMPUTER_BYTECODE || '0' }}
 
 jobs:
   resolve:
@@ -726,7 +732,14 @@ jobs:
           cd "${GITHUB_WORKSPACE}/build-src"
           node scripts/release-ci.mjs computer deps-build
 
-      - name: Build SEA binary
+      # Fallback leg. The published artifact is the Bun build below, but the SEA
+      # build still runs on every target so a Bun regression cannot cost us the
+      # release: if Bun fails, staging publishes this binary instead. It is
+      # best-effort here because making it fatal would defeat that purpose, and
+      # the staging step fails loudly when *both* legs are missing.
+      - name: Build SEA binary (fallback)
+        id: sea_build
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -739,19 +752,41 @@ jobs:
             --strip "${{ matrix.strip }}" \
             --out-dir "$RUNNER_TEMP/zeno-sea-out"
 
-      # Optional second artifact of the same target: `-bytecode` is the same Bun
-      # build with a JavaScriptCore bytecode cache, ~7x faster CLI startup for
-      # ~35% more bytes (measured on darwin-arm64). It is best-effort on purpose:
-      # install.sh treats the variant as optional and falls back to the SEA
-      # binary, so a failure here must not block a release that is otherwise
-      # fine. Steps below only stage it when the build actually succeeded.
-      - name: Set up Bun (bytecode variant)
+      - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - name: Build Bun binary (published)
+        id: bun_build
+        continue-on-error: true
+        shell: bash
+        # The workflow-level ZENO_COMPUTER_BYTECODE would otherwise leak in here
+        # too: with the repo variable set to 1 this step would emit a
+        # `-bytecode`-named binary, no canonical artifact would exist, and the
+        # stage step would silently publish the SEA fallback instead. Pin it off
+        # so the published binary is always the plain build.
+        env:
+          ZENO_COMPUTER_BYTECODE: "0"
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          node scripts/release-ci.mjs computer bun \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "$RELEASE_VERSION" \
+            --strip "${{ matrix.strip }}" \
+            --out-dir "$RUNNER_TEMP/zeno-bun-out"
+
+      # Optional faster-startup twin of the Bun binary: a JavaScriptCore bytecode
+      # cache, ~7x faster CLI startup for ~35% more bytes (measured on
+      # darwin-arm64). Off unless the repo variable ZENO_COMPUTER_BYTECODE=1 —
+      # the download grows ~55%, so it is never shipped by default. Best-effort:
+      # install.sh treats the variant as optional and falls back to the plain
+      # binary, so a failure here must not block the release.
       - name: Build Bun bytecode variant
         id: bun_bytecode
+        if: ${{ env.ZENO_COMPUTER_BYTECODE == '1' }}
         continue-on-error: true
         shell: bash
         run: |
@@ -771,21 +806,49 @@ jobs:
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}/build-src"
-          stage="${{ runner.temp }}/zeno-sea-stage"
-          node scripts/release-ci.mjs computer stage \
-            --from "$RUNNER_TEMP/zeno-sea-out" \
-            --to "$stage"
-          bc_out="$RUNNER_TEMP/zeno-bc-out"
-          bc_bin="$bc_out/zeno-computer-${{ matrix.platform }}-${{ matrix.arch }}-bytecode"
+          stage="${{ runner.temp }}/zeno-bin-stage"
+          ext=""
           if [[ "${{ matrix.platform }}" == "win32" ]]; then
-            bc_bin="${bc_bin}.exe"
+            ext=".exe"
           fi
-          if [[ -f "$bc_bin" ]]; then
+          canonical="zeno-computer-${{ matrix.platform }}-${{ matrix.arch }}${ext}"
+          bun_bin="$RUNNER_TEMP/zeno-bun-out/${canonical}"
+          sea_bin="$RUNNER_TEMP/zeno-sea-out/${canonical}"
+          bc_bin="$RUNNER_TEMP/zeno-bc-out/zeno-computer-${{ matrix.platform }}-${{ matrix.arch }}-bytecode${ext}"
+
+          # Whichever leg produced the canonical binary gets published under the
+          # canonical name. Only one of them is staged, so the manifest never has
+          # to know which runtime it is looking at.
+          if [[ -f "$bun_bin" ]]; then
             node scripts/release-ci.mjs computer stage \
-              --from "$bc_out" \
+              --from "$RUNNER_TEMP/zeno-bun-out" \
               --to "$stage"
+            echo "published artifact: Bun"
+          elif [[ -f "$sea_bin" ]]; then
+            node scripts/release-ci.mjs computer stage \
+              --from "$RUNNER_TEMP/zeno-sea-out" \
+              --to "$stage"
+            echo "::warning::Bun build did not produce ${canonical} (status: ${{ steps.bun_build.outcome }}); publishing the SEA fallback for this target"
           else
-            echo "::warning::bytecode variant missing (build status: ${{ steps.bun_bytecode.outcome }}); release ships the SEA binary only and install.sh will fall back to it"
+            echo "::error::neither the Bun nor the SEA leg produced ${canonical}"
+            echo "::error::bun status: ${{ steps.bun_build.outcome }}, sea status: ${{ steps.sea_build.outcome }}"
+            exit 1
+          fi
+
+          # The bytecode variant rides along only when it was built AND the
+          # canonical binary is the Bun one it was derived from. Shipping it next
+          # to a SEA fallback would make the "fast" twin a different runtime than
+          # the default, so that combination is skipped on purpose.
+          if [[ "$ZENO_COMPUTER_BYTECODE" == "1" ]]; then
+            if [[ -f "$bun_bin" && -f "$bc_bin" ]]; then
+              node scripts/release-ci.mjs computer stage \
+                --from "$RUNNER_TEMP/zeno-bc-out" \
+                --to "$stage"
+            elif [[ -f "$bc_bin" ]]; then
+              echo "::warning::bytecode variant built, but this target published the SEA fallback; the Bun twin is skipped so both paths stay on one runtime"
+            else
+              echo "::warning::bytecode variant was requested but is missing (status: ${{ steps.bun_bytecode.outcome }}); install.sh will fall back to the plain binary"
+            fi
           fi
           ls -l "$stage"
           echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
@@ -793,7 +856,7 @@ jobs:
       - name: Upload target artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zeno-computer-sea-${{ matrix.platform }}-${{ matrix.arch }}
+          name: zeno-computer-bin-${{ matrix.platform }}-${{ matrix.arch }}
           path: ${{ env.STAGE_DIR }}
           if-no-files-found: error
 
@@ -831,7 +894,9 @@ jobs:
       - name: Download all target artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: zeno-computer-sea-*
+          # Renamed from `zeno-computer-sea-*`: the staged binary is now the Bun
+          # build, with SEA only as the per-target fallback.
+          pattern: zeno-computer-bin-*
           path: ${{ runner.temp }}/zeno-bins
           merge-multiple: true
 

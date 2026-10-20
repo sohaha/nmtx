@@ -131,10 +131,13 @@ class ReleaseContracts(unittest.TestCase):
         self.assertNotIn("github.workflow", data["concurrency"]["group"])
         self.assertIn("zeno-release-", data["concurrency"]["group"])
 
+        # The computer artifact is no longer SEA-only (Bun is the published build,
+        # SEA the fallback), so its staged artifact carries a neutral name.
+        prefixes = {"server": "zeno-server-sea-", "computer": "zeno-computer-bin-"}
         for product in PRODUCTS:
             upload = artifact_step(data, f"{product}-build", "actions/upload-artifact@")
             download = artifact_step(data, f"{product}-package", "actions/download-artifact@")
-            prefix = f"zeno-{product}-sea-"
+            prefix = prefixes[product]
             self.assertTrue(upload["with"]["name"].startswith(prefix), product)
             self.assertEqual(download["with"]["pattern"], prefix + "*", product)
 
@@ -150,6 +153,27 @@ class ReleaseContracts(unittest.TestCase):
         self.assertTrue(server_release["with"]["name"].startswith("zeno-server-release-"))
         self.assertTrue(computer_release["with"]["name"].startswith("zeno-release-"))
         self.assertNotEqual(server_release["with"]["name"], computer_release["with"]["name"])
+
+    def test_bytecode_stays_off_the_published_binary(self):
+        """The bytecode switch is opt-in and must never reach the published build.
+
+        ZENO_COMPUTER_BYTECODE lives at workflow scope so the variant step can
+        read it. The published Bun step therefore has to pin it to "0": otherwise
+        a repo variable of 1 makes that step emit a `-bytecode`-named binary, no
+        canonical artifact appears, and staging silently falls back to SEA.
+        """
+        steps = job_steps(release_workflow(), "computer-build")
+        published = step_named(steps, "Build Bun binary (published)")
+        self.assertEqual(published["env"]["ZENO_COMPUTER_BYTECODE"], "0")
+        # No suffix and no --bytecode: the artifact must land on the canonical
+        # name that the manifest and the installer key off.
+        self.assertNotIn("--bytecode", published["run"])
+        self.assertNotIn("--name-suffix", published["run"])
+
+        variant = step_named(steps, "Build Bun bytecode variant")
+        self.assertIn("ZENO_COMPUTER_BYTECODE", variant["if"])
+        self.assertIn("--bytecode", variant["run"])
+        self.assertIn("--name-suffix", variant["run"])
 
 
 class ResolveInputs(unittest.TestCase):
