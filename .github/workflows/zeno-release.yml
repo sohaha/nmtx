@@ -92,6 +92,10 @@ env:
   R2_BUCKET: releases
   # Host node major must equal the SEA carrier major (build.mjs asserts it).
   NODE_VERSION: "24.15.0"
+  # Pinned for the optional Bun-compiled variant: bytecode layout is a
+  # JavaScriptCore internal, so a floating bun could silently change the
+  # artifact contract. Matches the pin in mise.toml.
+  BUN_VERSION: "1.4.3"
 
 jobs:
   resolve:
@@ -616,7 +620,9 @@ jobs:
               while IFS= read -r name; do
                 delete_key "$version/$name"
                 delete_key "$version/$name.sha256"
-              done < <(jq -r '[.targets[].file, .targets[].gz.file, .photonWasm.file] | flatten | map(select(. != null)) | unique | .[]' "$manifest")
+              # `.targets[].bytecode` is the optional faster-startup variant; it
+              # has to be pruned with its own .gz or the R2 tree grows forever.
+              done < <(jq -r '[.targets[].file, .targets[].gz.file, .targets[].bytecode.file, .targets[].bytecode.gz.file, .photonWasm.file] | flatten | map(select(. != null)) | unique | .[]' "$manifest")
             else
               echo "  manifest.json unreachable; deleting fixed keys only"
             fi
@@ -733,6 +739,33 @@ jobs:
             --strip "${{ matrix.strip }}" \
             --out-dir "$RUNNER_TEMP/zeno-sea-out"
 
+      # Optional second artifact of the same target: `-bytecode` is the same Bun
+      # build with a JavaScriptCore bytecode cache, ~7x faster CLI startup for
+      # ~35% more bytes (measured on darwin-arm64). It is best-effort on purpose:
+      # install.sh treats the variant as optional and falls back to the SEA
+      # binary, so a failure here must not block a release that is otherwise
+      # fine. Steps below only stage it when the build actually succeeded.
+      - name: Set up Bun (bytecode variant)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build Bun bytecode variant
+        id: bun_bytecode
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/build-src"
+          node scripts/release-ci.mjs computer bun \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --version "$RELEASE_VERSION" \
+            --strip "${{ matrix.strip }}" \
+            --bytecode \
+            --name-suffix "-bytecode" \
+            --out-dir "$RUNNER_TEMP/zeno-bc-out"
+
       - name: Stage release files
         shell: bash
         run: |
@@ -742,6 +775,18 @@ jobs:
           node scripts/release-ci.mjs computer stage \
             --from "$RUNNER_TEMP/zeno-sea-out" \
             --to "$stage"
+          bc_out="$RUNNER_TEMP/zeno-bc-out"
+          bc_bin="$bc_out/zeno-computer-${{ matrix.platform }}-${{ matrix.arch }}-bytecode"
+          if [[ "${{ matrix.platform }}" == "win32" ]]; then
+            bc_bin="${bc_bin}.exe"
+          fi
+          if [[ -f "$bc_bin" ]]; then
+            node scripts/release-ci.mjs computer stage \
+              --from "$bc_out" \
+              --to "$stage"
+          else
+            echo "::warning::bytecode variant missing (build status: ${{ steps.bun_bytecode.outcome }}); release ships the SEA binary only and install.sh will fall back to it"
+          fi
           ls -l "$stage"
           echo "STAGE_DIR=$stage" >> "$GITHUB_ENV"
 
