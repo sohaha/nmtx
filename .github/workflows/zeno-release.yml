@@ -775,7 +775,6 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "$RELEASE_VERSION" \
-            --strip "${{ matrix.strip }}" \
             --out-dir "$RUNNER_TEMP/zeno-bun-out"
 
       # Optional faster-startup twin of the Bun binary: a JavaScriptCore bytecode
@@ -796,7 +795,6 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "$RELEASE_VERSION" \
-            --strip "${{ matrix.strip }}" \
             --bytecode \
             --name-suffix "-bytecode" \
             --out-dir "$RUNNER_TEMP/zeno-bc-out"
@@ -815,16 +813,25 @@ jobs:
           bun_bin="$RUNNER_TEMP/zeno-bun-out/${canonical}"
           sea_bin="$RUNNER_TEMP/zeno-sea-out/${canonical}"
           bc_bin="$RUNNER_TEMP/zeno-bc-out/zeno-computer-${{ matrix.platform }}-${{ matrix.arch }}-bytecode${ext}"
+          bun_ok="${{ steps.bun_build.outcome }}"
+          sea_ok="${{ steps.sea_build.outcome }}"
+          bc_ok="${{ steps.bun_bytecode.outcome }}"
 
           # Whichever leg produced the canonical binary gets published under the
           # canonical name. Only one of them is staged, so the manifest never has
           # to know which runtime it is looking at.
-          if [[ -f "$bun_bin" ]]; then
+          #
+          # The step outcome is part of the test, not just file existence: a
+          # build that fails late (the smoke check runs last, so a corrupted
+          # binary still sits on disk) leaves a file behind that would otherwise
+          # be staged as canonical. That is exactly how a broken linux-x64 Bun
+          # binary was published once — never again.
+          if [[ "$bun_ok" == "success" && -f "$bun_bin" ]]; then
             node scripts/release-ci.mjs computer stage \
               --from "$RUNNER_TEMP/zeno-bun-out" \
               --to "$stage"
             echo "published artifact: Bun"
-          elif [[ -f "$sea_bin" ]]; then
+          elif [[ "$sea_ok" == "success" && -f "$sea_bin" ]]; then
             node scripts/release-ci.mjs computer stage \
               --from "$RUNNER_TEMP/zeno-sea-out" \
               --to "$stage"
@@ -840,11 +847,11 @@ jobs:
           # to a SEA fallback would make the "fast" twin a different runtime than
           # the default, so that combination is skipped on purpose.
           if [[ "$ZENO_COMPUTER_BYTECODE" == "1" ]]; then
-            if [[ -f "$bun_bin" && -f "$bc_bin" ]]; then
+            if [[ "$bun_ok" == "success" && "$bc_ok" == "success" && -f "$bun_bin" && -f "$bc_bin" ]]; then
               node scripts/release-ci.mjs computer stage \
                 --from "$RUNNER_TEMP/zeno-bc-out" \
                 --to "$stage"
-            elif [[ -f "$bc_bin" ]]; then
+            elif [[ "$bc_ok" == "success" && -f "$bc_bin" ]]; then
               echo "::warning::bytecode variant built, but this target published the SEA fallback; the Bun twin is skipped so both paths stay on one runtime"
             else
               echo "::warning::bytecode variant was requested but is missing (status: ${{ steps.bun_bytecode.outcome }}); install.sh will fall back to the plain binary"

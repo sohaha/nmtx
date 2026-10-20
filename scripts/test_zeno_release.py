@@ -175,6 +175,47 @@ class ReleaseContracts(unittest.TestCase):
         self.assertIn("--bytecode", variant["run"])
         self.assertIn("--name-suffix", variant["run"])
 
+    def test_staging_requires_a_successful_build_not_just_a_file(self):
+        """A failed build leg must never be staged as the canonical binary.
+
+        Regression: the linux-x64 Bun build of 0.0.14 failed its own smoke check
+        (`--version` answered the Bun runtime version because `strip` had
+        destroyed the embedded payload), yet the binary was still on disk, so a
+        `-f`-only gate staged it as canonical and the run would have published
+        it. Every staging branch therefore has to test the step outcome too.
+        """
+        steps = job_steps(release_workflow(), "computer-build")
+        stage = step_named(steps, "Stage release files")["run"]
+
+        for outcome in ("steps.bun_build.outcome",
+                        "steps.sea_build.outcome",
+                        "steps.bun_bytecode.outcome"):
+            self.assertIn(outcome, stage, outcome)
+
+        # Each `if` that opens a staging branch pairs the outcome with the file.
+        for pattern in (
+            r'if \[\[ "\$bun_ok" == "success" && -f "\$bun_bin" \]\]',
+            r'elif \[\[ "\$sea_ok" == "success" && -f "\$sea_bin" \]\]',
+            r'if \[\[ "\$bun_ok" == "success" && "\$bc_ok" == "success"',
+        ):
+            self.assertRegex(stage, pattern)
+
+        # A bare file-existence gate is the bug itself.
+        self.assertNotRegex(stage, r'if \[\[ -f "\$bun_bin" \]\]')
+        self.assertNotRegex(stage, r'elif \[\[ -f "\$sea_bin" \]\]')
+
+    def test_bun_legs_are_not_stripped(self):
+        """`strip` rewrites the metadata Bun uses to locate its appended payload.
+
+        Stripping a compiled Bun binary corrupted the linux-x64 artifact, so the
+        Bun legs must not ask for it. SEA keeps its strip: a Node SEA blob is
+        read from the end of the file and survives symbol removal.
+        """
+        steps = job_steps(release_workflow(), "computer-build")
+        for name in ("Build Bun binary (published)", "Build Bun bytecode variant"):
+            self.assertNotIn("--strip", step_named(steps, name)["run"], name)
+        self.assertIn("--strip", step_named(steps, "Build SEA binary (fallback)")["run"])
+
 
 class ResolveInputs(unittest.TestCase):
     """The merged workflow resolves everything from workflow_dispatch inputs
