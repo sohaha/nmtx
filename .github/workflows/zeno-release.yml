@@ -580,7 +580,7 @@ jobs:
             case "$1" in
               manifest.json|alpha/manifest.json|versions.json|README.md)
                 printf 'no-cache, must-revalidate' ;;
-              install.sh|install.ps1|uninstall.sh|uninstall.ps1)
+              install.sh|install.ps1|install-core.ps1|uninstall.sh|uninstall.ps1|uninstall-core.ps1)
                 printf 'public, max-age=3600' ;;
               *)
                 printf 'public, max-age=31536000, immutable' ;;
@@ -1009,7 +1009,7 @@ jobs:
             case "$1" in
               manifest.json|alpha/manifest.json|versions.json|README.md)
                 printf 'no-cache, must-revalidate' ;;
-              install.sh|install.ps1|uninstall.sh|uninstall.ps1)
+              install.sh|install.ps1|install-core.ps1|uninstall.sh|uninstall.ps1|uninstall-core.ps1)
                 printf 'public, max-age=3600' ;;
               *)
                 printf 'public, max-age=31536000, immutable' ;;
