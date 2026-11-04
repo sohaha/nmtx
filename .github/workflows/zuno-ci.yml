@@ -1,0 +1,905 @@
+name: Zuno CI (nmtx)
+
+# GENERATED FILE - do not edit. Source of truth: `.github/workflows/ci.yml` in
+# the zuno repository. Regenerate with:
+#
+#     python3 scripts/ci/sync_nmtx_workflow.py
+#
+# then upload the result to `sohaha/nmtx` as `.github/workflows/zuno-ci.yml`.
+# `python3 scripts/ci/sync_nmtx_workflow.py --check` runs in the zuno CI's
+# Release Automation job, so a hand edit here fails that gate instead of
+# silently becoming a second definition of green.
+#
+# Why a copy at all: sohaha/zuno is private and metered, sohaha/nmtx is public
+# and free. GitHub only runs workflows present in the run's own repository, so
+# the public side needs this file. Every job below is byte-identical to ci.yml
+# except that the source tree arrives from CNB at one exact SHA (the `resolve`
+# job pins it) instead of `actions/checkout` picking up the caller's repo.
+
+on:
+  repository_dispatch:
+    types: [ci-zuno]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        required: true
+        type: string
+        default: master
+        description: zuno branch, tag, or bare 40-character SHA (abbreviated SHAs are rejected).
+
+permissions:
+  contents: read
+
+concurrency:
+  # One in-flight validation per source ref: dispatching twice for the same
+  # commit should replace the older run, not race it for shared GHA caches.
+  group: zuno-ci-${{ inputs.source_ref || github.event.client_payload.source_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  ZUNO_CI: "1"
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/zuno
+
+jobs:
+  # Turns a branch / tag / full SHA into the exact commit every job builds, so
+  # a run can never mix two revisions (a branch could move mid-run).
+  resolve:
+    name: Resolve source SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Resolve source ref
+        id: payload
+        shell: bash
+        env:
+          DISPATCH_SOURCE_REF: ${{ github.event.client_payload.source_ref }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          source_ref="${DISPATCH_SOURCE_REF:-${INPUT_SOURCE_REF:-master}}"
+          if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/zuno/-/commit/([0-9a-f]{40})/?$ ]]; then
+            source_ref="${BASH_REMATCH[1]}"
+          fi
+          # An abbreviated SHA is not a ref, so `git fetch <sha>` cannot look it
+          # up; fail loudly here instead of surfacing a confusing later error.
+          if [[ "$source_ref" =~ ^[0-9a-f]{7,39}$ ]]; then
+            echo "source_ref is an abbreviated SHA; pass the full 40-character SHA: $source_ref"
+            exit 1
+          fi
+          [[ "$source_ref" =~ ^[0-9A-Za-z._/-]+$ ]] || {
+            echo "unsupported source ref: $source_ref"
+            exit 1
+          }
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve source SHA
+        id: source
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_REF: ${{ steps.payload.outputs.source_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CNB_TOKEN:-}" ]]; then
+            echo "Configure the CNB_TOKEN secret in ${GITHUB_REPOSITORY}: it reads the private zuno source from CNB."
+            exit 1
+          fi
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          auth_args=(
+            -c credential.helper=
+            -c core.askPass=
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}"
+          )
+
+          if [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            worktree="$(mktemp -d)"
+            trap 'rm -rf "$worktree"' EXIT
+            git init -q "$worktree"
+            git -C "$worktree" "${auth_args[@]}" fetch --depth=1 "$SOURCE_URL" "$SOURCE_REF"
+            source_sha="$(git -C "$worktree" rev-parse FETCH_HEAD)"
+          else
+            source_sha="$({
+              git "${auth_args[@]}" ls-remote \
+                "$SOURCE_URL" \
+                "refs/tags/$SOURCE_REF^{}" \
+                "refs/tags/$SOURCE_REF" \
+                "refs/heads/$SOURCE_REF"
+            } | awk 'NR == 1 { print $1 }')"
+          fi
+
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "unable to resolve zuno source ref: $SOURCE_REF"
+            exit 1
+          }
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+  quality:
+    name: Quality Guardrails
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: quality-ubuntu
+          cache-all-crates: "true"
+
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check all targets and all features
+        run: cargo check --all-targets --all-features
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Enforce Cargo.lock is up to date
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+
+      - name: Warning budget gate contract tests
+        shell: bash
+        run: scripts/test_check_warning_budget.sh
+
+      - name: Update rehearsal sandbox contract tests
+        run: python3 -m unittest -v scripts/test_update_rehearsal.py
+
+      - name: Enforce warning budget
+        shell: bash
+        run: scripts/check_warning_budget.sh
+
+      - name: Enforce oversized-file ratchet
+        shell: bash
+        run: python3 scripts/check_code_size_budget.py
+
+      - name: Enforce oversized-test ratchet
+        shell: bash
+        run: python3 scripts/check_test_size_budget.py
+
+      - name: Enforce panic-prone usage ratchet
+        shell: bash
+        run: python3 scripts/check_panic_budget.py
+
+      - name: Enforce swallowed-error usage ratchet
+        shell: bash
+        run: python3 scripts/check_swallowed_error_budget.py
+
+      - name: Enforce crate dependency boundaries
+        shell: bash
+        run: python3 scripts/check_dependency_boundaries.py
+
+      - name: Enforce Rust and TypeScript SDK surface parity
+        shell: bash
+        run: cargo test -p zuno-sdk parity -- --nocapture
+
+      - name: Enforce wildcard re-export ratchet
+        shell: bash
+        run: python3 scripts/check_wildcard_reexport_budget.py
+
+      # cargo-machete ships prebuilt binaries; `cargo install` compiles it for
+      # minutes on a cold CI box. install-action resolves the GitHub Release
+      # binary and falls back to cargo-binstall when no prebuilt exists.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: Enforce no unused dependencies
+        shell: bash
+        run: cargo machete
+
+  release-automation:
+    name: Release Automation
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Test Discord release announcements
+        run: python3 -m unittest -v scripts/test_post_discord_release.py
+
+      - name: 检查分叉发布构建路由
+        run: |
+          python3 tests/test_public_release_builds.py
+          bash -n scripts/build_linux_compat.sh
+
+      - name: Compile release automation scripts
+        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
+
+      - name: Check nmtx CI workflow is in sync
+        # sohaha/zuno is private and metered, sohaha/nmtx is public and free, so
+        # the same jobs also run there. GitHub only runs workflows present in the
+        # run's own repository, so nmtx holds a generated copy. Hand edits would
+        # silently make it a second definition of green; regenerating here keeps
+        # it a projection of this file.
+        run: python3 scripts/ci/sync_nmtx_workflow.py --check
+
+  build:
+    name: Build & Test (${{ matrix.os }}, ${{ matrix.shard }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    # 35 minutes covers a normal push (~12 min with a warm Swatinem cache) but
+    # not a *rerun*, where the cache is cold: three consecutive reruns of a
+    # known-good commit were cancelled at the cap, each getting further through
+    # the same green steps (#693). A rerun is exactly what you reach for after a
+    # concurrency cancellation, so the old cap made healthy commits look red.
+    # 75 still bounds a genuinely hung job well under the windows job's 150.
+    timeout-minutes: 75
+    # Some dependencies (e.g. convert_case 0.10.0 via derive_more/crossterm, and
+    # proc-macro2/quote) accidentally ship a `rust-toolchain.toml` *inside their
+    # published crate*. When cargo builds such a crate its CWD is that crate dir,
+    # so the rustup proxy honours the file: convert_case pins `channel = "1.83.0"`
+    # and proc-macro2 requests `components = ["rust-src"]`. That made every
+    # Build & Test job (a) race two parallel `rust-src` downloads and (b) later
+    # try to compile convert_case with rustc 1.83.0, failing with E0514/E0599.
+    # RUSTUP_TOOLCHAIN takes precedence over any rust-toolchain.toml override, so
+    # pinning it here makes every step use this job's installed stable toolchain.
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # One job definition, two parallel lanes per OS:
+        #   build   - release build + the integration/e2e tests it feeds
+        #   cohorts - the per-crate lib test cohorts
+        # Serialised, this job was the CI critical path (median 2457s wall on
+        # macOS, 1785s on Linux, both dominated by the two compiles). Split, the
+        # two lanes run concurrently and the OS-level wall clock is the slower
+        # lane instead of the sum. The release binary built in `build` is not
+        # consumed by any test (no `CARGO_BIN_EXE_*` / `target/release` reference
+        # in the tree), so the cohorts lane does not need to wait for it.
+        shard: [build, cohorts]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          # Pre-install rust-src in the (serial) toolchain step. Some build-script
+          # / proc-macro units trigger an on-demand `rustup component add rust-src`,
+          # and when several parallel cargo/rustc processes request it at once they
+          # race on the shared `~/.rustup/downloads/*.partial` file and fail with
+          # "could not rename ... No such file or directory". Fetching it once here
+          # removes the race. (Was failing every Build & Test job.)
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Suffix bumped to evict caches that held 1.83.0 / <unknown rustc>
+          # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
+          key: ${{ matrix.os }}-${{ matrix.shard }}-stablepin
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+
+      - name: Build
+        if: matrix.shard == 'build'
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+          fi
+          # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
+          # step used sccache while the later `cargo test --no-run` steps did not,
+          # so sccache emitted rlibs/rmetas stamped `<unknown rustc version>` that
+          # the non-sccache test compile then rejected with E0514
+          # ("compiled by an incompatible version of rustc"). rust-cache already
+          # caches target/ across runs, so a clean, wrapper-consistent build is
+          # both correct and fast enough.
+          export RUSTC="$(rustup which rustc)"
+          CARGO_BIN="$(rustup which cargo)"
+          "$CARGO_BIN" build --release --target ${{ matrix.target }}
+
+      - name: Compile library and binary tests
+        if: matrix.shard == 'cohorts'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
+
+      - name: Run deterministic retention-readiness cohort
+        if: matrix.shard == 'cohorts'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-app-core --lib retention_readiness -- --nocapture
+
+      - name: Run secret-input pty cohort (all platforms with a pty)
+        if: matrix.shard == 'cohorts' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-base --lib secret_input -- --nocapture
+
+      - name: Run browser session liveness and reuse regressions
+        if: matrix.shard == 'cohorts'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-base --lib browser_session -- --nocapture
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-app-core --lib browser_session -- --nocapture
+
+      - name: Run detached-spawn cohort (Linux, macOS)
+        if: matrix.shard == 'cohorts'
+        shell: bash
+        run: |
+          # cargo test takes a single positional test filter, so every
+          # detached-spawn regression gets its own invocation.
+          spawn_tests=(
+            spawn_detached_creates_new_session
+            configure_new_process_group_uses_child_pid
+            process_group_then_setsid_is_eperm
+          )
+          for spawn_test in "${spawn_tests[@]}"; do
+            echo "::group::detached-spawn ${spawn_test}"
+            python3 .github/scripts/run_with_timeout.py 600 \
+              "$(rustup which cargo)" test --target ${{ matrix.target }} \
+              -p zuno-base --lib "$spawn_test" -- --nocapture
+            echo "::endgroup::"
+          done
+
+      - name: Run embedding numeric-stability cohort (Linux only)
+        if: matrix.shard == 'cohorts' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_dir="$HOME/.zuno/models/all-MiniLM-L6-v2"
+          mkdir -p "$model_dir"
+          base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+          curl -sSfL --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
+          curl -sSfL --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
+          test -s "$model_dir/model.onnx"
+          test -s "$model_dir/tokenizer.json"
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-embedding --lib -- --nocapture \
+            | tee /tmp/embedding-cohort.log
+          grep -q "minilm_embedding_is_numerically_stable_across_inference_engines ... ok" \
+            /tmp/embedding-cohort.log
+          if grep -q "skip: MiniLM model not present" /tmp/embedding-cohort.log; then
+            echo "::error::embedding cohort skipped despite fetching the model"
+            exit 1
+          fi
+
+      - name: Run stdin-forwarding cohort (all platforms)
+        if: matrix.shard == 'cohorts'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
+
+      - name: Run TUI library tests (Linux only)
+        if: matrix.shard == 'cohorts' && runner.os == 'Linux'
+        shell: bash
+        env:
+          COLORTERM: truecolor
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p zuno-tui --lib -- --test-threads=1 \
+            --skip test_prompt_entry_shimmer_color_moves_across_positions \
+            --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
+
+      - name: Compile integration test binaries
+        if: matrix.shard == 'build'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            --test provider_matrix --test e2e --no-run
+
+      - name: Run provider matrix tests
+        if: matrix.shard == 'build'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --test provider_matrix
+
+      - name: Run e2e tests
+        if: matrix.shard == 'build'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --test e2e
+
+      # `powershell-syntax` on ubuntu-latest owns the PowerShell gate; a
+      # `runner.os == 'Windows'` step inside this ubuntu/macOS matrix could
+      # never run, so the old copy here was dead weight.
+      # Warning budget already ran in `quality` on ubuntu-latest, on the same
+      # `cargo check` output this job would re-produce. Re-running it here cost
+      # ~170s on Linux and ~230s on macOS in the measured run. Keep it in the
+      # guardrail job, which is also the job the git status depends on.
+      - name: Security preflight (Linux)
+        if: matrix.shard == 'build' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          # cargo-audit's post-install step was downloading & compiling crates
+          # for ~3 min. install-action resolves the GitHub Release binary, and
+          # --strict then only pays for the audit itself.
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            curl -sSfL "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz" \
+              | tar -xz -C "$RUNNER_TEMP"
+            # The release tarball's top-level directory embeds the version
+            # (`cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/`), so hard-coding
+            # the directory name breaks the moment the version moves.
+            audit_bin="$(find "$RUNNER_TEMP" -maxdepth 2 -type f -name cargo-audit | head -n1)"
+            test -n "$audit_bin"
+            install -m 0755 "$audit_bin" "$HOME/.cargo/bin/cargo-audit"
+          fi
+          scripts/security_preflight.sh --strict
+
+  windows-build-test:
+    name: Build & Test (windows-latest, ${{ matrix.shard }})
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 150
+    # Same split as the ubuntu/macOS matrix: the release build (median 1044s)
+    # and the Windows-specific test cohorts (median ~500s) no longer share one
+    # serial job. Distinct rust-cache keys per shard so each stays warm instead
+    # of the two lanes overwriting one cache entry.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [build, cohorts]
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-latest-${{ matrix.shard }}
+          cache-all-crates: "true"
+
+      - name: Build release binary
+        if: matrix.shard == 'build'
+        shell: pwsh
+        run: |
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --start-server *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $env:RUSTC_WRAPPER = 'sccache'
+            }
+          }
+
+          & cargo build --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows release build failed'
+          }
+
+      - name: Compile library and binary tests
+        if: matrix.shard == 'cohorts'
+        shell: pwsh
+        run: |
+          & cargo test --locked --target x86_64-pc-windows-msvc --lib --bins --no-run
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows library/binary test compilation failed'
+          }
+
+      - name: Run targeted Windows validation tests
+        if: matrix.shard == 'cohorts'
+        shell: pwsh
+        run: |
+          $tests = @(
+            'command_candidates_adds_extension_on_windows',
+            'command_exists_for_known_binary',
+            'command_exists_absolute_path',
+            'sibling_socket_path_roundtrip',
+            'cleanup_socket_pair_removes_main_and_debug_files',
+            'is_process_running_reports_exited_children_as_stopped',
+            'spawn_replacement_process_returns_without_waiting_for_child_exit',
+            'build_shell_command_uses_cmd_and_executes_command',
+            'pipe_name_is_stable_and_normalizes_case_and_separators',
+            'pipe_name_falls_back_when_stem_is_empty',
+            'busy_pipe_is_reported_as_a_live_socket_path',
+            'stream_pair_round_trips_bytes',
+            'split_stream_supports_concurrent_read_and_write',
+            'test_cancel_command_idle_reports_nothing_to_cancel',
+            'test_menu_number_rejected_as_api_key',
+            'test_command_palette_suppressed_while_api_key_prompt_pending',
+            'test_ctrl_c_with_active_copy_selection_copies_instead_of_quitting',
+            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through'
+          )
+
+          foreach ($testName in $tests) {
+            & ./scripts/invoke_cargo_with_timeout.ps1 `
+              -Name "Windows targeted test: $testName" `
+              -TimeoutSeconds 300 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--lib', $testName, '--', '--nocapture')
+          }
+
+      - name: Run Windows hotkey and power tests
+        if: matrix.shard == 'cohorts'
+        shell: pwsh
+        run: |
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows setup-hints tests' `
+            -TimeoutSeconds 300 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'zuno-setup-hints', '--lib', '--', '--nocapture')
+
+          & ./scripts/invoke_cargo_with_timeout.ps1 `
+            -Name 'Windows power-inhibit tests' `
+            -TimeoutSeconds 900 `
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'zuno-base', '--no-default-features', '--lib', 'power_inhibit::tests::windows_', '--', '--nocapture')
+
+      - name: Run Windows e2e smoke tests
+        if: matrix.shard == 'cohorts'
+        shell: pwsh
+        run: |
+          $tests = @(
+            'provider_behavior::test_socket_model_cycle_supported_models',
+            'provider_behavior::test_model_switch_resets_provider_session'
+          )
+
+          foreach ($testName in $tests) {
+            & ./scripts/invoke_cargo_with_timeout.ps1 `
+              -Name "Windows e2e smoke test: $testName" `
+              -TimeoutSeconds 420 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--test', 'e2e', $testName, '--', '--exact', '--nocapture')
+          }
+
+      - name: Run Windows lifecycle e2e tests
+        if: matrix.shard == 'cohorts'
+        shell: pwsh
+        env:
+          ZUNO_E2E_ARTIFACT_DIR: ${{ runner.temp }}/zuno-windows-e2e-logs
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:ZUNO_E2E_ARTIFACT_DIR | Out-Null
+          $tests = @(
+            'windows_lifecycle::windows_binary_server_accepts_clients_and_debug_cli',
+            'windows_lifecycle::windows_binary_server_rebinds_named_pipe_after_exit'
+          )
+          foreach ($testName in $tests) {
+            & ./scripts/invoke_cargo_with_timeout.ps1 `
+              -Name "Windows lifecycle e2e test: $testName" `
+              -TimeoutSeconds 420 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--test', 'e2e', $testName, '--', '--exact', '--nocapture')
+          }
+
+      - name: Upload Windows e2e diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-e2e-diagnostics
+          path: ${{ runner.temp }}/zuno-windows-e2e-logs
+          if-no-files-found: ignore
+
+      - name: Verify built binary launches
+        if: matrix.shard == 'build'
+        shell: pwsh
+        run: |
+          & "target/x86_64-pc-windows-msvc/release/zuno.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Built Windows binary failed to run --version'
+          }
+
+      - name: Run Windows installer lifecycle tests
+        if: matrix.shard == 'build'
+        shell: pwsh
+        run: |
+          & ./scripts/test_windows_launcher_install.ps1
+          & ./scripts/test_windows_setup_evaluation.ps1
+
+      - name: Verify installer using local artifact
+        if: matrix.shard == 'build'
+        shell: pwsh
+        run: |
+          $cargoVersion = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $cargoVersion) {
+            throw 'Could not determine Cargo.toml version'
+          }
+
+          # CI builds are development builds. Build metadata independently derives
+          # this identity from the root package version and appends `-dev`.
+          $version = 'v' + $cargoVersion.Matches[0].Groups[1].Value + '-dev'
+          & ./.github/scripts/verify_windows_install.ps1 `
+            -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/zuno.exe' `
+            -Version $version
+
+  fmt:
+    name: Format
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check module declarations resolve
+        run: python3 scripts/check_module_files.py
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  typescript-sdk:
+    name: TypeScript SDK
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+        working-directory: sdk/typescript
+
+      - name: Typecheck, build, and test
+        run: npm run check
+        working-directory: sdk/typescript
+
+      - name: Published tarball installs and imports
+        run: bash scripts/test_sdk_package.sh
+
+  setup-friction:
+    name: Setup Friction Eval (Linux installer)
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Install probe shells
+        run: sudo apt-get update && sudo apt-get install -y fish zsh
+
+      - name: Installer release path tests
+        run: bash scripts/test_install_release.sh
+
+      - name: Installer daemon-channel tests
+        run: bash scripts/test_install_release_channel.sh
+
+      - name: Setup friction scorecard
+        run: bash scripts/setup_friction_eval.sh
+
+  powershell-syntax:
+    name: PowerShell Syntax
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      # PowerShell 7 runs natively on the ubuntu-latest runner image, and both
+      # checks are pure parse-time work that does not need a Windows host.
+      # Moving it off windows-latest frees a Windows slot for the heavier
+      # windows-build-test job, which is otherwise the CI critical path.
+      - name: Check PowerShell script syntax (PowerShell 7)
+        shell: pwsh
+        run: |
+          & ./scripts/check_powershell_syntax.ps1
+
+  windows-cross-check:
+    name: Windows Cross-Target Check (Linux)
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      # Replaces `actions/checkout`: this run belongs to nmtx, so the default
+      # checkout would bring in nmtx's tree (one workflow file) instead of zuno.
+      # The SHA is pinned by `resolve`, so every job here builds one commit.
+      - name: Fetch zuno source at exact SHA
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          basic_auth_token="$(printf 'cnb:%s' "$CNB_TOKEN" | base64 | tr -d '\n')"
+          git init -q .
+          git -c credential.helper= -c core.askPass= \
+            -c "http.extraHeader=AUTHORIZATION: basic ${basic_auth_token}" \
+            fetch --depth=1 "$SOURCE_URL" "$SOURCE_SHA"
+          git checkout --force FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-cross-check
+          cache-all-crates: "true"
+
+      - name: Install LLVM toolchain for cargo-xwin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm ninja-build
+
+      # cargo-xwin publishes prebuilt binaries; install-action resolves them
+      # and falls back to cargo-binstall when GitHub does not serve one, so we
+      # stop spending ~2 min on `cargo install --git` here.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      - name: Check Windows x64 target
+        run: cargo xwin check --locked --target x86_64-pc-windows-msvc
+
+      - name: Check Windows ARM64 target (advisory)
+        continue-on-error: true
+        run: cargo xwin check --locked --target aarch64-pc-windows-msvc --no-default-features --features pdf
