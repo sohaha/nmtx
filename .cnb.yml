@@ -1,0 +1,10 @@
+include:
+  - https://cnb.cool/zls-tools/vm/-/blob/main/tools/sync-github-sohaha.yml
+
+
+$:
+  push:
+    sync_github:
+      env:
+        BRANCHS: main,dev,master
+        FORCE_PUSH: true
