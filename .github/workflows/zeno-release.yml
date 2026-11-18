@@ -50,10 +50,6 @@ on:
         required: true
         type: string
         description: Shared server/computer release version, for example 0.0.1 or 0.0.1-rc.1.
-      release_tag:
-        required: false
-        type: string
-        description: Optional GitHub release tag (computer). Defaults to computer-v<version>.
       channel:
         required: false
         type: string
@@ -63,11 +59,6 @@ on:
         type: boolean
         default: true
         description: Upload both release trees to R2 (disable for a build-only smoke run).
-      github_release:
-        required: false
-        type: boolean
-        default: false
-        description: Also create/update the computer GitHub release on RELEASE_REPO (requires the repo/token).
       retain:
         required: false
         type: string
@@ -85,10 +76,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   SOURCE_URL: https://cnb.cool/zls_nmtx/sohaha/bots
   SOURCE_REPO: zls_nmtx/sohaha/bots
-  # GitHub mirror repo that receives the release assets when github_release=true.
-  # Must already exist AND contain at least one commit: GitHub rejects
-  # `gh release create` on an empty repo (HTTP 422 "Repository is empty").
-  RELEASE_REPO: sohaha/zeno-computer-release
   R2_BUCKET: releases
   # Host node major must equal the SEA carrier major (build.mjs asserts it).
   NODE_VERSION: "24.15.0"
@@ -111,10 +98,8 @@ jobs:
       source_ref: ${{ steps.payload.outputs.source_ref }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       version: ${{ steps.payload.outputs.version }}
-      release_tag: ${{ steps.payload.outputs.release_tag }}
       channel: ${{ steps.payload.outputs.channel }}
       publish: ${{ steps.payload.outputs.publish }}
-      github_release: ${{ steps.payload.outputs.github_release }}
       retain: ${{ steps.payload.outputs.retain }}
     steps:
       - name: Resolve inputs
@@ -123,10 +108,8 @@ jobs:
         env:
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_CHANNEL: ${{ inputs.channel }}
           INPUT_PUBLISH: ${{ inputs.publish }}
-          INPUT_GITHUB_RELEASE: ${{ inputs.github_release }}
           INPUT_RETAIN: ${{ inputs.retain }}
         run: |
           set -euo pipefail
@@ -139,10 +122,8 @@ jobs:
 
           source_ref="$(pick "$INPUT_SOURCE_REF" dev)"
           version="$(pick "$INPUT_VERSION" "")"
-          release_tag="$(pick "$INPUT_RELEASE_TAG" "")"
           channel="$(pick "$INPUT_CHANNEL" "")"
           publish="$(pick "$INPUT_PUBLISH" true)"
-          github_release="$(pick "$INPUT_GITHUB_RELEASE" false)"
           retain="$(pick "$INPUT_RETAIN" 2)"
 
           if [[ "$source_ref" =~ ^https://cnb\.cool/zls_nmtx/sohaha/bots/-/commit/([0-9a-f]{40})/?$ ]]; then
@@ -163,15 +144,7 @@ jobs:
             echo "invalid channel: $channel (latest|alpha)"
             exit 1
           }
-          if [[ -z "$release_tag" ]]; then
-            release_tag="computer-v${version}"
-          fi
-          [[ "$release_tag" =~ ^computer-v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "invalid release tag: $release_tag"
-            exit 1
-          }
           case "$publish" in true|1|yes) publish=true ;; *) publish=false ;; esac
-          case "$github_release" in true|1|yes) github_release=true ;; *) github_release=false ;; esac
           [[ "$retain" =~ ^[0-9]+$ ]] || {
             echo "invalid retain: $retain (non-negative integer)"
             exit 1
@@ -180,10 +153,8 @@ jobs:
           {
             echo "source_ref=$source_ref"
             echo "version=$version"
-            echo "release_tag=$release_tag"
             echo "channel=$channel"
             echo "publish=$publish"
-            echo "github_release=$github_release"
             echo "retain=$retain"
           } >> "$GITHUB_OUTPUT"
 
@@ -191,10 +162,8 @@ jobs:
         shell: bash
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          RELEASE_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          GITHUB_RELEASE: ${{ steps.payload.outputs.github_release }}
         run: |
           set -euo pipefail
           missing=()
@@ -203,9 +172,6 @@ jobs:
               missing+=("$name")
             fi
           done
-          if [[ "$GITHUB_RELEASE" == "true" && -z "${RELEASE_TOKEN:-}" ]]; then
-            missing+=("CODEBAY_RELEASE_WRITE_TOKEN")
-          fi
           if ((${#missing[@]} > 0)); then
             echo "Configure these GitHub Actions secrets/variables in ${GITHUB_REPOSITORY}:"
             printf '  - %s\n' "${missing[@]}"
@@ -1070,83 +1036,3 @@ jobs:
             delete_key "$version/manifest.json"
           done
           echo "Prune complete: ${#dropped[@]} version(s) removed"
-
-  computer-publish-github:
-    needs: [resolve, computer-package]
-    if: needs.resolve.outputs.publish == 'true' && needs.resolve.outputs.github_release == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ secrets.CODEBAY_RELEASE_WRITE_TOKEN }}
-      RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
-      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-      RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
-    steps:
-      - name: Install GitHub CLI
-        run: |
-          set -euo pipefail
-          type -P gh >/dev/null || {
-            curl -fsSL https://github.com/cli/cli/releases/download/v2.82.0/gh_2.82.0_linux_amd64.tar.gz \
-              | tar -xz -C /tmp gh_2.82.0_linux_amd64/bin/gh
-            echo "/tmp/gh_2.82.0_linux_amd64/bin" >> "$GITHUB_PATH"
-          }
-
-      - name: Download release tree
-        uses: actions/download-artifact@v4
-        with:
-          name: zeno-release-${{ needs.resolve.outputs.version }}
-          path: ${{ runner.temp }}/zeno-release
-
-      - name: Create or update GitHub release
-        shell: bash
-        run: |
-          set -euo pipefail
-          version_dir="${{ runner.temp }}/zeno-release/${RELEASE_VERSION}"
-
-          cat > "${RUNNER_TEMP}/notes.md" <<EOF
-          ## Zeno Computer v${RELEASE_VERSION}
-
-          Self-contained single-file CLI (SEA): Linux x64/arm64, macOS arm64/x64, Windows x64.
-
-          ### Install
-
-          **macOS / Linux:**
-          \`\`\`bash
-          curl -fsSL https://releases.73zls.com/zeno/install.sh | sh
-          \`\`\`
-
-          **Windows (PowerShell):**
-          \`\`\`powershell
-          irm https://releases.73zls.com/zeno/install.ps1 | iex
-          \`\`\`
-
-          Verify downloads with the attached \`SHA256SUMS\` / per-file \`.sha256\` sidecars.
-          EOF
-
-          gh api "repos/${RELEASE_REPO}" >/dev/null
-          prerelease_args=()
-          if [[ "$RELEASE_CHANNEL" == "alpha" ]]; then
-            prerelease_args+=(--prerelease)
-          fi
-          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; updating assets."
-            gh release edit "$RELEASE_TAG" \
-              --repo "$RELEASE_REPO" \
-              --title "Zeno Computer ${RELEASE_VERSION}" \
-              --notes-file "${RUNNER_TEMP}/notes.md"
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$RELEASE_REPO" \
-              --title "Zeno Computer ${RELEASE_VERSION}" \
-              --notes-file "${RUNNER_TEMP}/notes.md" \
-              "${prerelease_args[@]}"
-          fi
-
-          mapfile -t assets < <(find "$version_dir" -maxdepth 1 -type f | sort)
-          [[ "${#assets[@]}" -gt 0 ]] || {
-            echo "no release assets found in $version_dir"
-            exit 1
-          }
-          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$RELEASE_REPO" --clobber
-
-          echo "Released: https://github.com/$RELEASE_REPO/releases/tag/$RELEASE_TAG"
